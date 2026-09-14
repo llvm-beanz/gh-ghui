@@ -1,0 +1,9 @@
+# Build artifacts
+/target
+
+# Note: Cargo.lock is intentionally committed for this binary workspace (do not ignore it)
+
+# Editor / OS noise
+.idea/
+*.swp
+.DS_Store
