@@ -7,7 +7,6 @@ Command line tools for working with GitHub projects.
 - **Non-interactive** — classic subcommands that take flags/environment and print results.
 - **Interactive** — a terminal user interface built with [ratatui](https://ratatui.rs) (crossterm backend), enabled with the `tui` cargo feature.
 
-> **Status:** initial stub. The project structure, CLI skeleton, and documentation layout are in place; most commands are TODO placeholders.
 
 ## Requirements
 
@@ -24,6 +23,7 @@ cargo build --features tui  # also build the interactive TUI
 
 ```sh
 cargo run -- --help
+cargo run -- login
 cargo run -- list
 cargo run --features tui -- tui
 ```

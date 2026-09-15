@@ -25,6 +25,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match &cli.command {
+        Some(Command::Login) => commands::login::run(),
         Some(Command::List) => commands::list::run(cli.token.as_deref()),
         #[cfg(feature = "tui")]
         Some(Command::Tui) => tui::run(),

@@ -17,6 +17,7 @@ cargo build --features tui # also build the interactive TUI
 
 ```sh
 cargo run -- --help                 # show all commands and flags
+cargo run -- login                  # login and store credentials in system credential store
 cargo run -- list                   # non-interactive example (stub)
 cargo run --features tui -- tui     # interactive TUI (stub)
 ```

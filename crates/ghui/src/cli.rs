@@ -19,6 +19,9 @@ pub struct Cli {
 /// Available subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Authenticate with GitHub and store the token.
+    Login,
+
     /// List repositories for the authenticated user (non-interactive).
     List,
 
