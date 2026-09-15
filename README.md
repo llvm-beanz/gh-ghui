@@ -25,6 +25,7 @@ cargo build --features tui  # also build the interactive TUI
 cargo run -- --help
 cargo run -- login
 cargo run -- list
+cargo run -- view https://github.com/orgs/hlsl-tc57/projects/1
 cargo run --features tui -- tui
 ```
 

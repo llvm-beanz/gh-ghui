@@ -19,6 +19,7 @@ cargo build --features tui # also build the interactive TUI
 cargo run -- --help                 # show all commands and flags
 cargo run -- login                  # login and store credentials in system credential store
 cargo run -- list                   # non-interactive example (stub)
+cargo run -- view <url>             # table of issues/PRs in a project
 cargo run --features tui -- tui     # interactive TUI (stub)
 ```
 

@@ -216,7 +216,11 @@ fn store_token(token: &str) -> Result<(), Box<dyn Error>> {
     eprintln!("Debug: Retrieved token length: {}", stored.len());
 
     if stored != token {
-        eprintln!("Debug: Token mismatch! Expected len={}, Got len={}", token.len(), stored.len());
+        eprintln!(
+            "Debug: Token mismatch! Expected len={}, Got len={}",
+            token.len(),
+            stored.len()
+        );
         return Err("Token verification failed: stored token does not match".into());
     }
 
@@ -226,7 +230,10 @@ fn store_token(token: &str) -> Result<(), Box<dyn Error>> {
 
 /// Retrieve a stored token from the keyring.
 pub fn get_token() -> Result<String, Box<dyn Error>> {
-    eprintln!("Debug: Retrieving token, Service={}, User={}", KEYRING_SERVICE, KEYRING_USER);
+    eprintln!(
+        "Debug: Retrieving token, Service={}, User={}",
+        KEYRING_SERVICE, KEYRING_USER
+    );
 
     let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
         .map_err(|e| format!("Failed to create keyring entry: {e}"))?;
