@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod github;
 
 #[cfg(feature = "tui")]
 mod tui;
@@ -26,6 +27,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match &cli.command {
         Some(Command::Login) => commands::login::run(cli.verbose),
+        Some(Command::View { url }) => commands::view::run(url),
         #[cfg(feature = "tui")]
         Some(Command::Tui) => tui::run(),
         None => {

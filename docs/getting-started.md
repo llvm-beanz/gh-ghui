@@ -19,6 +19,7 @@ cargo build --no-default-features # build without the TUI
 cargo run -- --help                 # show all commands and flags
 cargo run -- login                  # login and store credentials in system credential store
 cargo run -- --verbose login        # login with diagnostic progress
+cargo run -- view <url>             # table of issues/PRs in a project
 cargo run -- tui                    # interactive TUI (stub)
 ```
 

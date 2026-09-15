@@ -25,6 +25,8 @@ cargo build --no-default-features # build without the TUI
 ```sh
 cargo run -- --help
 cargo run -- login
+cargo run -- --verbose login
+cargo run -- view https://github.com/orgs/hlsl-tc57/projects/1
 cargo run -- tui
 ```
 

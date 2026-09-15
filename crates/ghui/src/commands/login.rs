@@ -180,6 +180,15 @@ impl TokenStore for KeyringTokenStore {
     }
 }
 
+/// Retrieve the stored GitHub token from the system credential store.
+pub fn get_token() -> Result<String, DynError> {
+    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        .map_err(|error| format!("Failed to access the system keyring: {error}"))?;
+    entry
+        .get_password()
+        .map_err(|error| format!("Failed to retrieve credentials: {error}").into())
+}
+
 trait Sleeper {
     fn sleep(&self, duration: Duration);
 }
