@@ -3,14 +3,14 @@
 ## Prerequisites
 
 - A stable Rust toolchain (e.g. via [rustup](https://rustup.rs))
-- (Optional) A GitHub personal access token for authenticated operations
+- A supported system credential store
 
 ## Build
 
 ```sh
 # From the repository root
-cargo build                # non-interactive mode
-cargo build --features tui # also build the interactive TUI
+cargo build                       # includes the TUI by default
+cargo build --no-default-features # build without the TUI
 ```
 
 ## Run
@@ -18,19 +18,20 @@ cargo build --features tui # also build the interactive TUI
 ```sh
 cargo run -- --help                 # show all commands and flags
 cargo run -- login                  # login and store credentials in system credential store
-cargo run -- list                   # non-interactive example (stub)
-cargo run --features tui -- tui     # interactive TUI (stub)
+cargo run -- --verbose login        # login with diagnostic progress
+cargo run -- tui                    # interactive TUI (stub)
 ```
 
-## Configuration
+## Permissions
 
-| Environment variable | Description |
-| --- | --- |
-| `GITHUB_TOKEN` | GitHub personal access token. `--token` accepts the same value on the command line. |
+Login requests only the `read:project` OAuth scope. GitHub does not offer a
+read-only OAuth scope for private repositories; requesting private repository
+access would require the much broader `repo` scope, so it is intentionally not
+requested. Credentials are stored in the system keyring and cannot be supplied
+on the command line.
 
 ## What's next
 
 This is a stub. Planned work:
 
-- Real `list` implementation against the GitHub API
 - Interactive TUI (browse repositories, issues, and pull requests)

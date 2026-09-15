@@ -526,7 +526,6 @@ dependencies = [
  "assert_cmd",
  "clap",
  "crossterm",
- "form_urlencoded",
  "keyring",
  "predicates",
  "ratatui",

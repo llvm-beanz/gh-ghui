@@ -2,10 +2,11 @@
 
 Command line tools for working with GitHub projects.
 
-`ghui` is a Cargo workspace that builds the `ghui` CLI. It supports two modes of operation:
+`ghui` is a Cargo workspace that builds the `ghui` CLI. It includes:
 
+- **OAuth login** - a device flow that stores credentials in the system keyring.
 - **Non-interactive** — classic subcommands that take flags/environment and print results.
-- **Interactive** — a terminal user interface built with [ratatui](https://ratatui.rs) (crossterm backend), enabled with the `tui` cargo feature.
+- **Interactive mode** - a terminal user interface built with [ratatui](https://ratatui.rs) and crossterm. The TUI is included by default.
 
 
 ## Requirements
@@ -15,8 +16,8 @@ Command line tools for working with GitHub projects.
 ## Build
 
 ```sh
-cargo build                 # non-interactive mode
-cargo build --features tui  # also build the interactive TUI
+cargo build                       # includes the TUI by default
+cargo build --no-default-features # build without the TUI
 ```
 
 ## Usage
@@ -24,9 +25,13 @@ cargo build --features tui  # also build the interactive TUI
 ```sh
 cargo run -- --help
 cargo run -- login
-cargo run -- list
-cargo run --features tui -- tui
+cargo run -- tui
 ```
+
+Use `--verbose` for diagnostic progress while logging in. Login requests the
+read-only `read:project` scope. GitHub does not provide a read-only OAuth scope
+for private repositories, so this narrow scope only permits repository access
+available without the broad `repo` scope.
 
 ## Repository layout
 

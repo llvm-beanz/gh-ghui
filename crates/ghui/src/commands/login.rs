@@ -1,27 +1,28 @@
-//! `login` — authenticate with GitHub and store the token.
+//! `login` - authenticate with GitHub and store the token.
 //!
 //! Uses the GitHub OAuth device flow to obtain a token, opens a browser for
-//! the user to authorize, and stores the token in the system credential store
-//! via the `keyring` crate.
+//! the user to authorize, and stores the token in the system credential store.
 
 use std::error::Error;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use keyring::Entry;
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, USER_AGENT};
+use reqwest::header::ACCEPT;
+use reqwest::StatusCode;
 use serde::Deserialize;
-use webbrowser;
+
+type DynError = Box<dyn Error>;
 
 const CLIENT_ID: &str = "Ov23li5S3LwmTDwXKubU";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+const OAUTH_SCOPE: &str = "read:project";
 const KEYRING_SERVICE: &str = "ghui";
 const KEYRING_USER: &str = "github_token";
 
-/// OAuth device code response.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct DeviceCodeResponse {
     device_code: String,
     user_code: String,
@@ -30,233 +31,410 @@ struct DeviceCodeResponse {
     interval: u64,
 }
 
-/// OAuth access token response.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
-struct AccessTokenResponse {
-    access_token: String,
-    token_type: Option<String>,
-    scope: Option<String>,
+#[serde(untagged)]
+enum TokenEndpointResponse {
+    Access {
+        access_token: String,
+    },
+    Error {
+        error: String,
+        error_description: Option<String>,
+    },
 }
 
-/// Run the login command: start device flow, open browser, poll for token,
-/// store in keyring.
-pub fn run() -> Result<(), Box<dyn Error>> {
-    println!("Starting GitHub OAuth device flow...");
+#[derive(Debug)]
+enum TokenPollResponse {
+    Authorized(String),
+    Pending,
+    SlowDown,
+    Denied(String),
+}
 
-    let client = Client::builder().user_agent("ghui").build()?;
+trait OAuthApi {
+    fn request_device_code(&self) -> Result<DeviceCodeResponse, DynError>;
+    fn request_access_token(&self, device_code: &str) -> Result<TokenPollResponse, DynError>;
+}
 
-    // Step 1: Request device code
-    let response = client
-        .post(GITHUB_DEVICE_CODE_URL)
-        .header(ACCEPT, "application/json")
-        .header(USER_AGENT, "ghui")
-        .form(&[("client_id", CLIENT_ID), ("scope", "repo")])
-        .send()
-        .map_err(|e| format!("Failed to request device code: {e}"))?;
+struct GitHubOAuthApi {
+    client: Client,
+}
 
-    let raw_body = response
-        .text()
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
+impl GitHubOAuthApi {
+    fn new() -> Result<Self, DynError> {
+        let client = Client::builder().user_agent("ghui").build()?;
+        Ok(Self { client })
+    }
+}
 
-    let device_resp: DeviceCodeResponse = serde_json::from_str(&raw_body).map_err(|e| {
-        format!("Failed to parse device code response: {e}. GitHub returned: {raw_body}")
-    })?;
+impl OAuthApi for GitHubOAuthApi {
+    fn request_device_code(&self) -> Result<DeviceCodeResponse, DynError> {
+        let response = self
+            .client
+            .post(GITHUB_DEVICE_CODE_URL)
+            .header(ACCEPT, "application/json")
+            .form(&[("client_id", CLIENT_ID), ("scope", OAUTH_SCOPE)])
+            .send()
+            .map_err(|error| format!("Failed to request device authorization: {error}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("Failed to read GitHub's response: {error}"))?;
 
-    println!();
-    println!("To authorize this device, visit:");
-    println!("  {}", device_resp.verification_uri);
-    println!("Enter code: {}", device_resp.user_code);
-    println!();
-
-    // Step 2: Open browser
-    if let Err(e) = webbrowser::open(&device_resp.verification_uri) {
-        eprintln!("Warning: Could not open browser automatically: {e}");
-        eprintln!("Please open the URL above manually in your browser.");
+        parse_device_response(status, &body)
     }
 
-    // Step 3: Poll for token
-    let token = poll_for_token(
-        &client,
-        &device_resp.device_code,
-        device_resp.interval,
-        device_resp.expires_in,
-    )?;
-
-    // Step 4: Store token in keyring
-    store_token(&token)?;
-
-    println!("Successfully authenticated! Token stored in system keyring");
-    Ok(())
-}
-
-/// Poll the GitHub token endpoint until authorization is complete.
-fn poll_for_token(
-    client: &Client,
-    device_code: &str,
-    interval_secs: u64,
-    expires_in: u64,
-) -> Result<String, Box<dyn Error>> {
-    let interval = Duration::from_secs(interval_secs);
-    let start = std::time::Instant::now();
-    let mut poll_count = 0;
-
-    loop {
-        if start.elapsed() > Duration::from_secs(expires_in) {
-            return Err("Device code expired. Please run `ghui login` again.".into());
-        }
-
-        poll_count += 1;
-        print!("\rWaiting for authorization... (attempt {poll_count})");
-        std::io::Write::flush(&mut std::io::stdout())?;
-
-        let resp = client
+    fn request_access_token(&self, device_code: &str) -> Result<TokenPollResponse, DynError> {
+        let response = self
+            .client
             .post(GITHUB_TOKEN_URL)
             .header(ACCEPT, "application/json")
-            .header(USER_AGENT, "ghui")
             .form(&[
                 ("client_id", CLIENT_ID),
                 ("device_code", device_code),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ])
-            .send();
+            .send()
+            .map_err(|error| format!("Failed to check authorization status: {error}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("Failed to read GitHub's response: {error}"))?;
 
-        match resp {
-            Ok(resp) if resp.status().is_success() => {
-                let body = resp.text()?;
+        parse_token_response(status, &body)
+    }
+}
 
-                if let Ok(err_resp) = serde_json::from_str::<serde_json::Value>(&body) {
-                    if let Some(err) = err_resp.get("error").and_then(|e| e.as_str()) {
-                        match err {
-                            "authorization_pending" => {
-                                poll_count += 1;
-                                print!("\rWaiting for authorization... (attempt {poll_count})");
-                                std::io::Write::flush(&mut std::io::stdout())?;
-                                thread::sleep(interval);
-                                continue;
-                            }
-                            "slow_down" => {
-                                poll_count += 1;
-                                print!("\rWaiting for authorization... (attempt {poll_count})");
-                                std::io::Write::flush(&mut std::io::stdout())?;
-                                thread::sleep(interval + Duration::from_secs(1));
-                                continue;
-                            }
-                            _ => {
-                                let desc = err_resp
-                                    .get("error_description")
-                                    .and_then(|d| d.as_str())
-                                    .unwrap_or("");
-                                return Err(format!("OAuth error: {err} {desc}").into());
-                            }
-                        }
-                    }
-                }
+fn parse_device_response(status: StatusCode, body: &str) -> Result<DeviceCodeResponse, DynError> {
+    if !status.is_success() {
+        return Err(format!("GitHub rejected device authorization with HTTP {status}").into());
+    }
 
-                let token_resp: AccessTokenResponse = serde_json::from_str(&body)
-                    .map_err(|e| format!("Failed to parse token response: {e}"))?;
-                println!("\rAuthorization granted!                    ");
-                return Ok(token_resp.access_token);
+    serde_json::from_str(body)
+        .map_err(|_| "GitHub returned an invalid device authorization response".into())
+}
+
+fn parse_token_response(status: StatusCode, body: &str) -> Result<TokenPollResponse, DynError> {
+    let response: TokenEndpointResponse = serde_json::from_str(body).map_err(|_| -> DynError {
+        if status.is_success() {
+            "GitHub returned an invalid token response".into()
+        } else {
+            format!("GitHub token request failed with HTTP {status}").into()
+        }
+    })?;
+
+    match response {
+        TokenEndpointResponse::Access { access_token } if status.is_success() => {
+            if access_token.is_empty() {
+                Err("GitHub returned an empty access token".into())
+            } else {
+                Ok(TokenPollResponse::Authorized(access_token))
             }
-            Ok(resp) => {
-                let body = resp.text()?;
-
-                if let Ok(err_resp) = serde_json::from_str::<serde_json::Value>(&body) {
-                    if let Some(err) = err_resp.get("error").and_then(|e| e.as_str()) {
-                        match err {
-                            "authorization_pending" => {
-                                thread::sleep(interval);
-                            }
-                            "slow_down" => {
-                                thread::sleep(interval + Duration::from_secs(1));
-                            }
-                            _ => {
-                                let desc = err_resp
-                                    .get("error_description")
-                                    .and_then(|d| d.as_str())
-                                    .unwrap_or("");
-                                return Err(format!("OAuth error: {err} {desc}").into());
-                            }
-                        }
-                    } else {
-                        return Err(format!("Unexpected response: {body}").into());
-                    }
-                } else {
-                    return Err(format!("Unexpected response: {body}").into());
-                }
-            }
-            Err(e) => {
-                eprintln!("\rHTTP error during polling: {e}");
-                std::io::Write::flush(&mut std::io::stdout())?;
-                thread::sleep(interval);
-            }
+        }
+        TokenEndpointResponse::Access { .. } => {
+            Err(format!("GitHub token request failed with HTTP {status}").into())
+        }
+        TokenEndpointResponse::Error { error, .. } if error == "authorization_pending" => {
+            Ok(TokenPollResponse::Pending)
+        }
+        TokenEndpointResponse::Error { error, .. } if error == "slow_down" => {
+            Ok(TokenPollResponse::SlowDown)
+        }
+        TokenEndpointResponse::Error {
+            error,
+            error_description,
+        } => {
+            let message = error_description.unwrap_or(error);
+            Ok(TokenPollResponse::Denied(message))
         }
     }
 }
 
-/// Store the token in the system keyring.
-fn store_token(token: &str) -> Result<(), Box<dyn Error>> {
-    eprintln!("Debug: Storing token of length {}", token.len());
-    eprintln!("Debug: Service={}, User={}", KEYRING_SERVICE, KEYRING_USER);
+trait BrowserLauncher {
+    fn open(&self, url: &str) -> Result<(), DynError>;
+}
 
-    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
-        .map_err(|e| format!("Failed to create keyring entry: {e}"))?;
+struct SystemBrowser;
 
-    entry
-        .set_password(token)
-        .map_err(|e| format!("Failed to store token in keyring: {e}"))?;
+impl BrowserLauncher for SystemBrowser {
+    fn open(&self, url: &str) -> Result<(), DynError> {
+        webbrowser::open(url)?;
+        Ok(())
+    }
+}
 
-    eprintln!("Debug: set_password() succeeded");
+trait TokenStore {
+    fn store(&self, token: &str) -> Result<(), DynError>;
+}
 
-    // Verify the token was stored by reading it back
-    let stored = entry
-        .get_password()
-        .map_err(|e| format!("Failed to verify token in keyring: {e}"))?;
+struct KeyringTokenStore;
 
-    eprintln!("Debug: Retrieved token length: {}", stored.len());
+impl TokenStore for KeyringTokenStore {
+    fn store(&self, token: &str) -> Result<(), DynError> {
+        let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|error| format!("Failed to access the system keyring: {error}"))?;
+        entry
+            .set_password(token)
+            .map_err(|error| format!("Failed to store credentials: {error}"))?;
+        Ok(())
+    }
+}
 
-    if stored != token {
-        eprintln!("Debug: Token mismatch! Expected len={}, Got len={}", token.len(), stored.len());
-        return Err("Token verification failed: stored token does not match".into());
+trait Sleeper {
+    fn sleep(&self, duration: Duration);
+}
+
+struct ThreadSleeper;
+
+impl Sleeper for ThreadSleeper {
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
+/// Run the GitHub OAuth device flow.
+pub fn run(verbose: bool) -> Result<(), DynError> {
+    let api = GitHubOAuthApi::new()?;
+    execute_login(
+        &api,
+        &SystemBrowser,
+        &KeyringTokenStore,
+        &ThreadSleeper,
+        verbose,
+    )
+}
+
+fn execute_login(
+    api: &impl OAuthApi,
+    browser: &impl BrowserLauncher,
+    token_store: &impl TokenStore,
+    sleeper: &impl Sleeper,
+    verbose: bool,
+) -> Result<(), DynError> {
+    verbose_message(verbose, "Requesting a device code from GitHub");
+    let device = api.request_device_code()?;
+
+    println!("Open {}", device.verification_uri);
+    println!("Enter code: {}", device.user_code);
+
+    if let Err(error) = browser.open(&device.verification_uri) {
+        eprintln!("Could not open a browser automatically: {error}");
+    } else {
+        verbose_message(verbose, "Opened the authorization page in your browser");
     }
 
-    eprintln!("Debug: Token successfully stored and verified");
+    println!("Waiting for authorization...");
+    let token = poll_for_token(
+        api,
+        &device.device_code,
+        device.interval,
+        device.expires_in,
+        sleeper,
+        verbose,
+    )?;
+
+    verbose_message(verbose, "Saving credentials to the system keyring");
+    token_store.store(&token)?;
+    println!("Login successful. Credentials stored in the system keyring.");
     Ok(())
 }
 
-/// Retrieve a stored token from the keyring.
-pub fn get_token() -> Result<String, Box<dyn Error>> {
-    eprintln!("Debug: Retrieving token, Service={}, User={}", KEYRING_SERVICE, KEYRING_USER);
+fn poll_for_token(
+    api: &impl OAuthApi,
+    device_code: &str,
+    interval_secs: u64,
+    expires_in: u64,
+    sleeper: &impl Sleeper,
+    verbose: bool,
+) -> Result<String, DynError> {
+    let mut interval = Duration::from_secs(interval_secs);
+    let expires_after = Duration::from_secs(expires_in);
+    let started_at = Instant::now();
+    let mut attempts = 0_u64;
 
-    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
-        .map_err(|e| format!("Failed to create keyring entry: {e}"))?;
+    loop {
+        if started_at.elapsed() >= expires_after {
+            return Err("The device code expired. Run `ghui login` again.".into());
+        }
 
-    let result = entry.get_password();
+        attempts += 1;
+        verbose_message(
+            verbose,
+            &format!("Checking authorization (attempt {attempts})"),
+        );
 
-    match result {
-        Ok(token) => {
-            eprintln!("Debug: Token retrieved, length: {}", token.len());
-            let token = token.trim().to_string();
-            if token.is_empty() {
-                eprintln!("Debug: Token is empty after trim");
-                return Err("Token is empty".into());
+        match api.request_access_token(device_code)? {
+            TokenPollResponse::Authorized(token) => return Ok(token),
+            TokenPollResponse::Pending => sleeper.sleep(interval),
+            TokenPollResponse::SlowDown => {
+                interval += Duration::from_secs(5);
+                verbose_message(
+                    verbose,
+                    &format!("GitHub requested a slower polling interval ({interval:?})"),
+                );
+                sleeper.sleep(interval);
             }
-            Ok(token)
+            TokenPollResponse::Denied(message) => {
+                return Err(format!("GitHub authorization failed: {message}").into());
+            }
         }
-        Err(e) => {
-            eprintln!("Debug: Failed to get password: {}", e);
-            Err(format!("Failed to read token from keyring: {e}").into())
-        }
+    }
+}
+
+fn verbose_message(verbose: bool, message: &str) {
+    if verbose {
+        eprintln!("ghui: {message}");
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
     use super::*;
 
+    struct MockOAuthApi {
+        device: DeviceCodeResponse,
+        responses: RefCell<VecDeque<TokenPollResponse>>,
+    }
+
+    impl MockOAuthApi {
+        fn new(responses: impl IntoIterator<Item = TokenPollResponse>) -> Self {
+            Self {
+                device: DeviceCodeResponse {
+                    device_code: "device-code".into(),
+                    user_code: "ABCD-1234".into(),
+                    verification_uri: "https://github.example/device".into(),
+                    expires_in: 60,
+                    interval: 0,
+                },
+                responses: RefCell::new(responses.into_iter().collect()),
+            }
+        }
+    }
+
+    impl OAuthApi for MockOAuthApi {
+        fn request_device_code(&self) -> Result<DeviceCodeResponse, DynError> {
+            Ok(self.device.clone())
+        }
+
+        fn request_access_token(&self, _device_code: &str) -> Result<TokenPollResponse, DynError> {
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| "No mocked token response remains".into())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockBrowser {
+        opened_urls: RefCell<Vec<String>>,
+    }
+
+    impl BrowserLauncher for MockBrowser {
+        fn open(&self, url: &str) -> Result<(), DynError> {
+            self.opened_urls.borrow_mut().push(url.into());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockTokenStore {
+        tokens: RefCell<Vec<String>>,
+    }
+
+    impl TokenStore for MockTokenStore {
+        fn store(&self, token: &str) -> Result<(), DynError> {
+            self.tokens.borrow_mut().push(token.into());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockSleeper {
+        durations: RefCell<Vec<Duration>>,
+    }
+
+    impl Sleeper for MockSleeper {
+        fn sleep(&self, duration: Duration) {
+            self.durations.borrow_mut().push(duration);
+        }
+    }
+
     #[test]
-    fn test_keyring_constants() {
-        assert_eq!(KEYRING_SERVICE, "ghui");
-        assert_eq!(KEYRING_USER, "github_token");
+    fn execute_login_authorized_stores_token() -> Result<(), DynError> {
+        let api = MockOAuthApi::new([
+            TokenPollResponse::Pending,
+            TokenPollResponse::Authorized("access-token".into()),
+        ]);
+        let browser = MockBrowser::default();
+        let token_store = MockTokenStore::default();
+        let sleeper = MockSleeper::default();
+
+        execute_login(&api, &browser, &token_store, &sleeper, false)?;
+
+        assert_eq!(
+            browser.opened_urls.into_inner(),
+            ["https://github.example/device"]
+        );
+        assert_eq!(token_store.tokens.into_inner(), ["access-token"]);
+        assert_eq!(sleeper.durations.into_inner(), [Duration::ZERO]);
+        Ok(())
+    }
+
+    #[test]
+    fn poll_for_token_slow_down_persists_increased_interval() -> Result<(), DynError> {
+        let api = MockOAuthApi::new([
+            TokenPollResponse::SlowDown,
+            TokenPollResponse::Pending,
+            TokenPollResponse::Authorized("access-token".into()),
+        ]);
+        let sleeper = MockSleeper::default();
+
+        let token = poll_for_token(&api, "device-code", 2, 60, &sleeper, false)?;
+
+        assert_eq!(token, "access-token");
+        assert_eq!(
+            sleeper.durations.into_inner(),
+            [Duration::from_secs(7), Duration::from_secs(7)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_device_response_does_not_expose_response_body() {
+        let body = r#"{"device_code":"secret-device-code"}"#;
+
+        let error = parse_device_response(StatusCode::OK, body)
+            .unwrap_err()
+            .to_string();
+
+        assert!(!error.contains("secret-device-code"));
+        assert_eq!(
+            error,
+            "GitHub returned an invalid device authorization response"
+        );
+    }
+
+    #[test]
+    fn parse_token_response_maps_authorization_errors() -> Result<(), DynError> {
+        let pending = parse_token_response(StatusCode::OK, r#"{"error":"authorization_pending"}"#)?;
+        let denied = parse_token_response(
+            StatusCode::OK,
+            r#"{"error":"access_denied","error_description":"The user declined"}"#,
+        )?;
+
+        assert!(matches!(pending, TokenPollResponse::Pending));
+        assert!(matches!(
+            denied,
+            TokenPollResponse::Denied(message) if message == "The user declined"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_scope_is_read_only_for_projects() {
+        assert_eq!(OAUTH_SCOPE, "read:project");
     }
 }

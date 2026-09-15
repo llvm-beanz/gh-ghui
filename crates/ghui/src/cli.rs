@@ -4,10 +4,6 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "ghui", version, about, long_about = None)]
 pub struct Cli {
-    /// GitHub personal access token (falls back to the `GITHUB_TOKEN` environment variable).
-    #[arg(long, env = "GITHUB_TOKEN", global = true)]
-    pub token: Option<String>,
-
     /// Increase output verbosity.
     #[arg(short, long, global = true)]
     pub verbose: bool,
@@ -21,9 +17,6 @@ pub struct Cli {
 pub enum Command {
     /// Authenticate with GitHub and store the token.
     Login,
-
-    /// List repositories for the authenticated user (non-interactive).
-    List,
 
     /// Launch the interactive terminal UI.
     #[cfg(feature = "tui")]
