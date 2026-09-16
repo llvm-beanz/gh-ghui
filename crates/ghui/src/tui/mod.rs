@@ -12,7 +12,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::commands::login;
@@ -27,7 +27,7 @@ struct App {
     mode: Mode,
     command: String,
     project: Option<Project>,
-    scroll: usize,
+    selected: Option<usize>,
     message: Option<String>,
     should_quit: bool,
 }
@@ -68,12 +68,12 @@ impl App {
                 self.message = None;
                 self.mode = Mode::Command;
             }
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
-            KeyCode::PageDown => self.scroll_down(10),
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::Home | KeyCode::Char('g') => self.scroll = 0,
-            KeyCode::End | KeyCode::Char('G') => self.scroll = self.max_scroll(),
+            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            KeyCode::PageDown => self.move_selection(10),
+            KeyCode::PageUp => self.move_selection(-10),
+            KeyCode::Home | KeyCode::Char('g') => self.select_first(),
+            KeyCode::End | KeyCode::Char('G') => self.select_last(),
             _ => {}
         }
         None
@@ -119,15 +119,27 @@ impl App {
         None
     }
 
-    fn scroll_down(&mut self, amount: usize) {
-        self.scroll = self.scroll.saturating_add(amount).min(self.max_scroll());
+    fn move_selection(&mut self, amount: isize) {
+        let Some(last_index) = self.last_item_index() else {
+            self.selected = None;
+            return;
+        };
+        let selected = self.selected.unwrap_or_default();
+        self.selected = Some(selected.saturating_add_signed(amount).min(last_index));
     }
 
-    fn max_scroll(&self) -> usize {
+    fn select_first(&mut self) {
+        self.selected = self.last_item_index().map(|_| 0);
+    }
+
+    fn select_last(&mut self) {
+        self.selected = self.last_item_index();
+    }
+
+    fn last_item_index(&self) -> Option<usize> {
         self.project
             .as_ref()
-            .map(|project| project.items.len().saturating_add(1))
-            .unwrap_or_default()
+            .and_then(|project| project.items.len().checked_sub(1))
     }
 }
 
@@ -242,8 +254,8 @@ fn open_project(
 
     match result {
         Ok(project) => {
+            app.selected = (!project.items.is_empty()).then_some(0);
             app.project = Some(project);
-            app.scroll = 0;
             app.message = None;
         }
         Err(error) => app.message = Some(error.to_string()),
@@ -254,17 +266,14 @@ fn render(frame: &mut Frame, app: &App) {
     let [content_area, status_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
 
-    let (title, lines) = match &app.project {
-        Some(project) => (
-            format!(" {} - {} items ", project.title, project.items.len()),
-            project_lines(project),
+    match &app.project {
+        Some(project) => render_project(frame, content_area, project, app.selected),
+        None => frame.render_widget(
+            Paragraph::new("No project open")
+                .block(Block::default().borders(Borders::ALL).title(" ghui ")),
+            content_area,
         ),
-        None => (" ghui ".into(), vec![Line::from("No project open")]),
-    };
-    let content = Paragraph::new(lines)
-        .scroll((app.scroll.min(u16::MAX as usize) as u16, 0))
-        .block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(content, content_area);
+    }
 
     let status = match app.mode {
         Mode::Normal => normal_status(app.message.as_deref()),
@@ -281,6 +290,30 @@ fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+fn render_project(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    project: &Project,
+    selected: Option<usize>,
+) {
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " {} - {} items ",
+        project.title,
+        project.items.len()
+    ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [header_area, rows_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+    let table = project_table(project);
+    frame.render_widget(Paragraph::new(table.header), header_area);
+    let rows =
+        List::new(table.rows).highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    let mut state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(rows, rows_area, &mut state);
+}
+
 fn normal_status(message: Option<&str>) -> Line<'static> {
     let mode = ratatui::text::Span::styled(
         " NORMAL ",
@@ -295,7 +328,12 @@ fn normal_status(message: Option<&str>) -> Line<'static> {
     }
 }
 
-fn project_lines(project: &Project) -> Vec<Line<'static>> {
+struct ProjectTable {
+    header: Vec<Line<'static>>,
+    rows: Vec<ListItem<'static>>,
+}
+
+fn project_table(project: &Project) -> ProjectTable {
     let columns = field_columns(&project.items);
     let mut header: Vec<String> = vec!["#".into(), "Type".into(), "Title".into()];
     header.extend(columns.iter().cloned());
@@ -347,7 +385,7 @@ fn project_lines(project: &Project) -> Vec<Line<'static>> {
             .join("  ")
     };
 
-    let mut lines = vec![
+    let header = vec![
         Line::styled(
             format_row(&header),
             Style::default().add_modifier(Modifier::BOLD),
@@ -360,8 +398,11 @@ fn project_lines(project: &Project) -> Vec<Line<'static>> {
                 .join("  "),
         ),
     ];
-    lines.extend(rows.iter().map(|row| Line::from(format_row(row))));
-    lines
+    let rows = rows
+        .iter()
+        .map(|row| ListItem::new(format_row(row)))
+        .collect();
+    ProjectTable { header, rows }
 }
 
 fn field_columns(items: &[Item]) -> Vec<String> {
@@ -467,7 +508,7 @@ mod tests {
 
         assert_eq!(app.project.as_ref().unwrap().items.len(), 3);
         assert_eq!(source.requests()[0].1, "token");
-        assert_eq!(app.scroll, 0);
+        assert_eq!(app.selected, Some(0));
         assert_eq!(app.message, None);
     }
 
@@ -490,21 +531,26 @@ mod tests {
     }
 
     #[test]
-    fn normal_mode_scrolls_project() {
+    fn normal_mode_moves_selection() {
         let mut app = App {
             project: Some(sample_project(20)),
+            selected: Some(0),
             ..Default::default()
         };
 
         app.handle_key(key(KeyCode::Char('j')));
         app.handle_key(key(KeyCode::PageDown));
-        assert_eq!(app.scroll, 11);
+        assert_eq!(app.selected, Some(11));
 
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.scroll, 10);
+        assert_eq!(app.selected, Some(10));
 
         app.handle_key(key(KeyCode::Char('g')));
-        assert_eq!(app.scroll, 0);
+        assert_eq!(app.selected, Some(0));
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected, Some(19));
     }
 
     #[test]
@@ -542,5 +588,43 @@ mod tests {
         assert!(screen.contains("Demo - 2 items"));
         assert!(screen.contains("Issue 1"));
         assert!(screen.contains(":q"));
+    }
+
+    #[test]
+    fn scrolling_keeps_column_header_visible() {
+        let backend = TestBackend::new(50, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App {
+            project: Some(sample_project(10)),
+            selected: Some(5),
+            ..Default::default()
+        };
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen
+            .lines()
+            .any(|line| line.contains('#') && line.contains("Type") && line.contains("Title")));
+        assert!(screen.contains("Issue 6"));
+        assert!(!screen.contains("Issue 1 "));
+
+        let selected_row = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .find(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("Issue 6")
+            })
+            .unwrap();
+        assert!(selected_row.iter().any(|cell| cell.bg == Color::Cyan));
     }
 }
