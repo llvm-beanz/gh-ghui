@@ -27,5 +27,32 @@ pub enum Command {
 
     /// Launch the interactive terminal UI.
     #[cfg(feature = "tui")]
-    Tui,
+    Tui {
+        /// URL of the GitHub project to open.
+        #[arg(value_name = "URL")]
+        url: Option<String>,
+    },
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tui_url_is_optional() {
+        let without_url = Cli::try_parse_from(["ghui", "tui"]).unwrap();
+        assert!(matches!(
+            without_url.command,
+            Some(Command::Tui { url: None })
+        ));
+
+        let with_url =
+            Cli::try_parse_from(["ghui", "tui", "https://github.com/orgs/example/projects/1"])
+                .unwrap();
+        assert!(matches!(
+            with_url.command,
+            Some(Command::Tui { url: Some(url) })
+                if url == "https://github.com/orgs/example/projects/1"
+        ));
+    }
 }
