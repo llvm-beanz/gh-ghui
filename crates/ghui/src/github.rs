@@ -305,17 +305,23 @@ fn response_snippet(body: &str) -> String {
 
 fn field_value(value: FieldValueData) -> Option<(String, String)> {
     match value {
-        FieldValueData::Text { field, text } => Some((field.name, text.unwrap_or_default())),
+        FieldValueData::Text { field, text } => display_field(field, text.unwrap_or_default()),
         FieldValueData::Number { field, number } => {
-            Some((field.name, number.map(format_number).unwrap_or_default()))
+            display_field(field, number.map(format_number).unwrap_or_default())
         }
-        FieldValueData::Date { field, date } => Some((field.name, date.unwrap_or_default())),
+        FieldValueData::Date { field, date } => display_field(field, date.unwrap_or_default()),
         FieldValueData::SingleSelect { field, name } => {
-            Some((field.name, name.unwrap_or_default()))
+            display_field(field, name.unwrap_or_default())
         }
-        FieldValueData::Iteration { field, title } => Some((field.name, title.unwrap_or_default())),
+        FieldValueData::Iteration { field, title } => {
+            display_field(field, title.unwrap_or_default())
+        }
         FieldValueData::Unsupported => None,
     }
+}
+
+fn display_field(field: FieldData, value: String) -> Option<(String, String)> {
+    (field.name != "Title").then_some((field.name, value))
 }
 
 fn format_number(number: f64) -> String {
@@ -622,6 +628,7 @@ mod tests {
                     "pageInfo": { "hasNextPage": false, "endCursor": null },
                     "nodes": [{
                         "fieldValues": { "nodes": [
+                            { "__typename": "ProjectV2ItemFieldTextValue", "field": { "name": "Title" }, "text": "Fix" },
                             { "__typename": "ProjectV2ItemFieldSingleSelectValue", "field": { "name": "Status" }, "name": "Done" },
                             { "__typename": "ProjectV2ItemFieldNumberValue", "field": { "name": "Estimate" }, "number": 3.0 }
                         ] },
