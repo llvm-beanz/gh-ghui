@@ -20,7 +20,8 @@ use ratatui::{Frame, Terminal};
 
 use crate::commands::login;
 use crate::github::{
-    parse_project_url, DynError, GitHubProjectSource, Item, Kind, Project, ProjectSource,
+    parse_project_url, DynError, EditableField, EditableFieldKind, FieldValue, GitHubProjectSource,
+    Item, Kind, Project, ProjectSource,
 };
 use state::ViewState;
 
@@ -35,6 +36,7 @@ struct App {
     state_path: Option<PathBuf>,
     column_selected: usize,
     active_column: Option<String>,
+    field_editor: Option<FieldEditor>,
     message: Option<String>,
     should_quit: bool,
 }
@@ -46,13 +48,37 @@ enum Mode {
     Command,
     Columns,
     Active,
+    EditField,
 }
 
 #[derive(Debug, PartialEq, Eq)]
+enum FieldEditor {
+    Input {
+        field: EditableField,
+        value: String,
+    },
+    Select {
+        field: EditableField,
+        selected: usize,
+    },
+}
+
+#[derive(Debug, PartialEq)]
+struct FieldUpdate {
+    project_id: String,
+    item_id: String,
+    field_id: String,
+    field_name: String,
+    value: FieldValue,
+    display_value: String,
+}
+
+#[derive(Debug, PartialEq)]
 enum Action {
     Edit(String),
     Write,
     WriteQuit,
+    UpdateField(FieldUpdate),
 }
 
 impl App {
@@ -71,6 +97,7 @@ impl App {
             Mode::Command => self.handle_command_key(key.code),
             Mode::Columns => self.handle_columns_key(key.code),
             Mode::Active => self.handle_active_key(key.code),
+            Mode::EditField => self.handle_field_editor_key(key.code),
         }
     }
 
@@ -135,15 +162,53 @@ impl App {
 
     fn handle_active_key(&mut self, key: KeyCode) -> Option<Action> {
         match key {
-            KeyCode::Esc | KeyCode::Enter => {
+            KeyCode::Esc => {
                 self.active_column = None;
                 self.mode = Mode::Normal;
             }
+            KeyCode::Enter => self.open_field_editor(),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Tab => self.cycle_active_column(1),
             KeyCode::BackTab => self.cycle_active_column(-1),
             _ => {}
+        }
+        None
+    }
+
+    fn handle_field_editor_key(&mut self, key: KeyCode) -> Option<Action> {
+        if key == KeyCode::Esc {
+            self.field_editor = None;
+            self.message = None;
+            self.mode = Mode::Active;
+            return None;
+        }
+
+        match self.field_editor.as_mut()? {
+            FieldEditor::Input { value, .. } => match key {
+                KeyCode::Enter => return self.field_update_action(),
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(character) => value.push(character),
+                _ => {}
+            },
+            FieldEditor::Select { field, selected } => match key {
+                KeyCode::Enter => return self.field_update_action(),
+                KeyCode::Char('j') | KeyCode::Down => {
+                    *selected = selected
+                        .saturating_add(1)
+                        .min(field.options.len().saturating_sub(1));
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    *selected = selected.saturating_sub(1);
+                }
+                KeyCode::Home | KeyCode::Char('g') => *selected = 0,
+                KeyCode::End | KeyCode::Char('G') => {
+                    *selected = field.options.len().saturating_sub(1);
+                }
+                _ => {}
+            },
         }
         None
     }
@@ -249,8 +314,7 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .filter(|column| {
-                column.mutable
-                    && enabled.is_none_or(|enabled| enabled.contains(&column.name))
+                column.mutable && enabled.is_none_or(|enabled| enabled.contains(&column.name))
             })
             .map(|column| column.name)
             .collect()
@@ -282,6 +346,120 @@ impl App {
         let index = (selected as isize + amount).rem_euclid(columns.len() as isize) as usize;
         self.active_column = Some(columns[index].clone());
     }
+
+    fn open_field_editor(&mut self) {
+        let Some(project) = &self.project else { return };
+        let Some(field_name) = &self.active_column else {
+            return;
+        };
+        let Some(field) = project
+            .editable_fields
+            .iter()
+            .find(|field| &field.name == field_name)
+            .cloned()
+        else {
+            self.message = Some(format!("No editing metadata for {field_name}"));
+            return;
+        };
+        let current = self
+            .view_state
+            .selected
+            .and_then(|index| project.items.get(index))
+            .and_then(|item| item.fields.iter().find(|(name, _)| name == field_name))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        self.field_editor = Some(match field.kind {
+            EditableFieldKind::Text | EditableFieldKind::Number | EditableFieldKind::Date => {
+                FieldEditor::Input {
+                    field,
+                    value: current,
+                }
+            }
+            EditableFieldKind::SingleSelect | EditableFieldKind::Iteration => {
+                let selected = field
+                    .options
+                    .iter()
+                    .position(|option| option.name == current)
+                    .unwrap_or_default();
+                FieldEditor::Select { field, selected }
+            }
+        });
+        self.message = None;
+        self.mode = Mode::EditField;
+    }
+
+    fn field_update_action(&mut self) -> Option<Action> {
+        let project = self.project.as_ref()?;
+        let item = project.items.get(self.view_state.selected?)?;
+        let (field, value, display_value) = match self.field_editor.as_ref()? {
+            FieldEditor::Input { field, value } => {
+                let parsed = match field.kind {
+                    EditableFieldKind::Text => FieldValue::Text(value.clone()),
+                    EditableFieldKind::Number => match value.parse::<f64>() {
+                        Ok(number) if number.is_finite() => FieldValue::Number(number),
+                        _ => {
+                            self.message = Some("Enter a valid number".into());
+                            return None;
+                        }
+                    },
+                    EditableFieldKind::Date if valid_iso_date(value) => {
+                        FieldValue::Date(value.clone())
+                    }
+                    EditableFieldKind::Date => {
+                        self.message = Some("Enter a date as YYYY-MM-DD".into());
+                        return None;
+                    }
+                    _ => return None,
+                };
+                (field, parsed, value.clone())
+            }
+            FieldEditor::Select { field, selected } => {
+                let option = field.options.get(*selected)?;
+                let value = match field.kind {
+                    EditableFieldKind::SingleSelect => FieldValue::SingleSelect(option.id.clone()),
+                    EditableFieldKind::Iteration => FieldValue::Iteration(option.id.clone()),
+                    _ => return None,
+                };
+                (field, value, option.name.clone())
+            }
+        };
+        Some(Action::UpdateField(FieldUpdate {
+            project_id: project.id.clone(),
+            item_id: item.id.clone(),
+            field_id: field.id.clone(),
+            field_name: field.name.clone(),
+            value,
+            display_value,
+        }))
+    }
+}
+
+fn valid_iso_date(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return false;
+    }
+    let (Ok(year), Ok(month), Ok(day)) = (
+        year.parse::<u32>(),
+        month.parse::<u32>(),
+        day.parse::<u32>(),
+    ) else {
+        return false;
+    };
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day)
 }
 
 trait TokenProvider {
@@ -366,6 +544,9 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
                 Some(Action::WriteQuit) => {
                     write_and_maybe_quit(&mut app, true);
                 }
+                Some(Action::UpdateField(update)) => {
+                    update_field(&mut app, update, &token_provider, &source);
+                }
                 None => {}
             }
         }
@@ -437,6 +618,49 @@ fn write_and_maybe_quit(app: &mut App, quit: bool) {
     }
 }
 
+fn update_field(
+    app: &mut App,
+    update: FieldUpdate,
+    token_provider: &dyn TokenProvider,
+    source: &dyn ProjectSource,
+) {
+    let Some(token) = token_provider.token() else {
+        app.message = Some("No GitHub token found; set GITHUB_TOKEN or run `ghui login`".into());
+        return;
+    };
+    match source.update_field(
+        &update.project_id,
+        &update.item_id,
+        &update.field_id,
+        update.value,
+        &token,
+    ) {
+        Ok(()) => {
+            if let Some(item) = app.project.as_mut().and_then(|project| {
+                project
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == update.item_id)
+            }) {
+                if let Some((_, value)) = item
+                    .fields
+                    .iter_mut()
+                    .find(|(name, _)| name == &update.field_name)
+                {
+                    *value = update.display_value;
+                } else {
+                    item.fields
+                        .push((update.field_name.clone(), update.display_value));
+                }
+            }
+            app.field_editor = None;
+            app.mode = Mode::Active;
+            app.message = Some(format!("Updated {}", update.field_name));
+        }
+        Err(error) => app.message = Some(error.to_string()),
+    }
+}
+
 fn open_project(
     app: &mut App,
     url: &str,
@@ -495,7 +719,9 @@ fn render(frame: &mut Frame, app: &App) {
             project,
             app.view_state.selected,
             app.view_state.columns.as_deref(),
-            (app.mode == Mode::Active).then_some(app.active_column.as_deref()).flatten(),
+            (app.mode == Mode::Active)
+                .then_some(app.active_column.as_deref())
+                .flatten(),
         ),
         None => frame.render_widget(
             Paragraph::new("No project open")
@@ -515,6 +741,11 @@ fn render(frame: &mut Frame, app: &App) {
         Mode::Command => Line::from(format!(":{}", app.command)),
         Mode::Columns => Line::from(" COLUMNS  Space toggle  Enter/Esc close "),
         Mode::Active => Line::from(" ACTIVE  Tab cycle  Up/Down move  Enter/Esc close "),
+        Mode::EditField => Line::from(
+            app.message
+                .as_deref()
+                .unwrap_or(" EDIT FIELD  Enter save  Esc cancel "),
+        ),
     };
     frame.render_widget(Paragraph::new(status), status_content_area);
     frame.render_widget(
@@ -532,6 +763,9 @@ fn render(frame: &mut Frame, app: &App) {
 
     if app.mode == Mode::Columns {
         render_columns(frame, app);
+    }
+    if app.mode == Mode::EditField {
+        render_field_editor(frame, app);
     }
 }
 
@@ -582,6 +816,49 @@ fn render_columns(frame: &mut Frame, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn render_field_editor(frame: &mut Frame, app: &App) {
+    let Some(editor) = &app.field_editor else {
+        return;
+    };
+    let area = centered_rect(60, 35, frame.area());
+    frame.render_widget(Clear, area);
+    match editor {
+        FieldEditor::Input { field, value } => {
+            let hint = match field.kind {
+                EditableFieldKind::Text => "Text",
+                EditableFieldKind::Number => "Number",
+                EditableFieldKind::Date => "Date (YYYY-MM-DD)",
+                _ => "Value",
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} - {} ", field.name, hint));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            frame.render_widget(Paragraph::new(value.as_str()), inner);
+            frame.set_cursor_position((
+                (inner.x + value.chars().count() as u16).min(inner.right().saturating_sub(1)),
+                inner.y,
+            ));
+        }
+        FieldEditor::Select { field, selected } => {
+            let items = field
+                .options
+                .iter()
+                .map(|option| ListItem::new(option.name.clone()));
+            let list = List::new(items)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(" {} - Select value ", field.name)),
+                )
+                .highlight_style(Style::default().fg(Color::Black).bg(Color::Yellow));
+            let mut state = ListState::default().with_selected(Some(*selected));
+            frame.render_stateful_widget(list, area, &mut state);
+        }
+    }
+}
+
 fn centered_rect(
     percent_x: u16,
     percent_y: u16,
@@ -623,9 +900,7 @@ fn project_table(
 ) -> ProjectTable {
     let columns = project_columns(project)
         .into_iter()
-        .filter(|column| {
-            enabled_columns.is_none_or(|enabled| enabled.contains(&column.name))
-        })
+        .filter(|column| enabled_columns.is_none_or(|enabled| enabled.contains(&column.name)))
         .map(|column| column.name)
         .collect::<Vec<_>>();
     let header = columns.clone();
@@ -699,12 +974,12 @@ fn project_table(
         .enumerate()
         .map(|(row_index, row)| {
             let spans = row.iter().enumerate().map(|(column_index, cell)| {
-                let suffix = if column_index + 1 == row.len() { "" } else { "  " };
-                let content = format!(
-                    "{:<width$}{suffix}",
-                    cell,
-                    width = widths[column_index]
-                );
+                let suffix = if column_index + 1 == row.len() {
+                    ""
+                } else {
+                    "  "
+                };
+                let content = format!("{:<width$}{suffix}", cell, width = widths[column_index]);
                 if selected == Some(row_index)
                     && active_column == Some(columns[column_index].as_str())
                 {
@@ -716,10 +991,7 @@ fn project_table(
                             .add_modifier(Modifier::BOLD),
                     )
                 } else if selected == Some(row_index) && active_column.is_some() {
-                    Span::styled(
-                        content,
-                        Style::default().fg(Color::Black).bg(Color::Cyan),
-                    )
+                    Span::styled(content, Style::default().fg(Color::Black).bg(Color::Cyan))
                 } else {
                     Span::raw(content)
                 }
@@ -787,7 +1059,7 @@ mod tests {
 
     use super::*;
     use crate::github::testing::MockProjectSource;
-    use crate::github::Content;
+    use crate::github::{Content, FieldOption};
 
     struct FixedToken(Option<String>);
 
@@ -811,11 +1083,28 @@ mod tests {
 
     fn sample_project(item_count: usize) -> Project {
         Project {
+            id: "project-id".into(),
             title: "Demo".into(),
             field_names: vec!["Status".into()],
             mutable_field_names: vec!["Status".into()],
+            editable_fields: vec![EditableField {
+                id: "status-field".into(),
+                name: "Status".into(),
+                kind: EditableFieldKind::SingleSelect,
+                options: vec![
+                    FieldOption {
+                        id: "todo-option".into(),
+                        name: "Todo".into(),
+                    },
+                    FieldOption {
+                        id: "done-option".into(),
+                        name: "Done".into(),
+                    },
+                ],
+            }],
             items: (0..item_count)
                 .map(|index| Item {
+                    id: format!("item-{index}"),
                     content: Some(Content {
                         kind: Kind::Issue,
                         number: Some(index as u32 + 1),
@@ -927,6 +1216,7 @@ mod tests {
     fn classifies_project_fields_as_mutable() {
         let mut project = sample_project(1);
         project.field_names.push("Priority".into());
+        project.mutable_field_names.push("Priority".into());
 
         let columns = project_columns(&project);
 
@@ -961,6 +1251,7 @@ mod tests {
     fn active_mode_cycles_mutable_columns_and_moves_rows() {
         let mut project = sample_project(3);
         project.field_names.push("Priority".into());
+        project.mutable_field_names.push("Priority".into());
         let mut app = App {
             project: Some(project),
             view_state: ViewState::new(None, Some(0)),
@@ -983,6 +1274,134 @@ mod tests {
         assert_eq!(app.mode, Mode::Active);
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.view_state.selected, Some(0));
+    }
+
+    #[test]
+    fn enter_on_active_selection_opens_and_updates_select_field() {
+        let source = MockProjectSource::returning(sample_project(1));
+        let mut app = App {
+            project: Some(sample_project(1)),
+            view_state: ViewState::new(None, Some(0)),
+            mode: Mode::Active,
+            active_column: Some("Status".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
+        assert_eq!(app.mode, Mode::EditField);
+        app.handle_key(key(KeyCode::Down));
+        let action = app.handle_key(key(KeyCode::Enter)).unwrap();
+        let Action::UpdateField(update) = action else {
+            panic!("expected field update");
+        };
+        update_field(&mut app, update, &FixedToken(Some("token".into())), &source);
+
+        assert_eq!(
+            source.updates()[0].value,
+            FieldValue::SingleSelect("done-option".into())
+        );
+        assert_eq!(app.project.as_ref().unwrap().items[0].fields[0].1, "Done");
+        assert_eq!(app.mode, Mode::Active);
+    }
+
+    #[test]
+    fn free_form_editors_validate_number_and_date_formats() {
+        let fields = [
+            ("Estimate", EditableFieldKind::Number, "not-a-number", "3.5"),
+            ("Due", EditableFieldKind::Date, "2026-02-30", "2026-02-28"),
+        ];
+        for (name, kind, invalid, valid) in fields {
+            let mut project = sample_project(1);
+            project.field_names.push(name.into());
+            project.mutable_field_names.push(name.into());
+            project.editable_fields.push(EditableField {
+                id: format!("{name}-field"),
+                name: name.into(),
+                kind,
+                options: vec![],
+            });
+            let mut app = App {
+                project: Some(project),
+                view_state: ViewState::new(None, Some(0)),
+                mode: Mode::Active,
+                active_column: Some(name.into()),
+                ..Default::default()
+            };
+
+            app.handle_key(key(KeyCode::Enter));
+            if let Some(FieldEditor::Input { value, .. }) = app.field_editor.as_mut() {
+                *value = invalid.into();
+            }
+            assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
+            assert!(app.message.is_some());
+            if let Some(FieldEditor::Input { value, .. }) = app.field_editor.as_mut() {
+                *value = valid.into();
+            }
+            assert!(matches!(
+                app.handle_key(key(KeyCode::Enter)),
+                Some(Action::UpdateField(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn text_editor_prefills_current_value_and_accepts_free_form_text() {
+        let mut project = sample_project(1);
+        project.field_names.push("Notes".into());
+        project.mutable_field_names.push("Notes".into());
+        project.editable_fields.push(EditableField {
+            id: "notes-field".into(),
+            name: "Notes".into(),
+            kind: EditableFieldKind::Text,
+            options: vec![],
+        });
+        project.items[0]
+            .fields
+            .push(("Notes".into(), "hello".into()));
+        let mut app = App {
+            project: Some(project),
+            view_state: ViewState::new(None, Some(0)),
+            mode: Mode::Active,
+            active_column: Some("Notes".into()),
+            ..Default::default()
+        };
+
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('!')));
+        let Some(Action::UpdateField(update)) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected field update");
+        };
+
+        assert_eq!(update.value, FieldValue::Text("hello!".into()));
+        assert_eq!(update.display_value, "hello!");
+    }
+
+    #[test]
+    fn selection_field_renders_option_dialog() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let project = sample_project(1);
+        let mut app = App {
+            project: Some(project),
+            view_state: ViewState::new(None, Some(0)),
+            mode: Mode::Active,
+            active_column: Some("Status".into()),
+            ..Default::default()
+        };
+        app.handle_key(key(KeyCode::Enter));
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Status - Select value"));
+        assert!(screen.contains("Todo"));
+        assert!(screen.contains("Done"));
     }
 
     #[test]

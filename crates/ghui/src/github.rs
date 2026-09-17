@@ -27,18 +27,26 @@ query GetProjectItems(
 }
 
 fragment ProjectFields on ProjectV2 {
-  title
+    id
+    title
     fields(first: 100) {
         nodes {
             __typename
-            ... on ProjectV2Field { name dataType }
-            ... on ProjectV2IterationField { name }
-            ... on ProjectV2SingleSelectField { name }
+                        ... on ProjectV2Field { id name dataType }
+                        ... on ProjectV2IterationField {
+                            id name
+                            configuration {
+                                iterations { id title }
+                                completedIterations { id title }
+                            }
+                        }
+                        ... on ProjectV2SingleSelectField { id name options { id name } }
         }
     }
   items(first: 100, after: $cursor) {
     pageInfo { hasNextPage endCursor }
     nodes {
+            id
       fieldValues(first: 100) {
         nodes {
           __typename
@@ -74,6 +82,23 @@ fragment ProjectFields on ProjectV2 {
 }
 "#;
 
+#[cfg(feature = "tui")]
+const UPDATE_FIELD_MUTATION: &str = r#"
+mutation UpdateProjectItemField(
+    $projectId: ID!
+    $itemId: ID!
+    $fieldId: ID!
+    $value: ProjectV2FieldValue!
+) {
+    updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: $value
+    }) { projectV2Item { id } }
+}
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectRef {
     owner: String,
@@ -104,20 +129,65 @@ pub(crate) struct Content {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Item {
+    pub(crate) id: String,
     pub(crate) content: Option<Content>,
     pub(crate) fields: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FieldOption {
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditableFieldKind {
+    Text,
+    Number,
+    Date,
+    SingleSelect,
+    Iteration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EditableField {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) kind: EditableFieldKind,
+    pub(crate) options: Vec<FieldOption>,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FieldValue {
+    Text(String),
+    Number(f64),
+    Date(String),
+    SingleSelect(String),
+    Iteration(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Project {
+    pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) field_names: Vec<String>,
     pub(crate) mutable_field_names: Vec<String>,
+    pub(crate) editable_fields: Vec<EditableField>,
     pub(crate) items: Vec<Item>,
 }
 
 pub(crate) trait ProjectSource {
     fn fetch_project(&self, project_ref: &ProjectRef, token: &str) -> Result<Project, DynError>;
+    #[cfg(feature = "tui")]
+    fn update_field(
+        &self,
+        project_id: &str,
+        item_id: &str,
+        field_id: &str,
+        value: FieldValue,
+        token: &str,
+    ) -> Result<(), DynError>;
 }
 
 pub(crate) fn parse_project_url(input: &str) -> Result<ProjectRef, DynError> {
@@ -170,8 +240,10 @@ impl GitHubProjectSource<ReqwestGraphQlTransport> {
 impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
     fn fetch_project(&self, project_ref: &ProjectRef, token: &str) -> Result<Project, DynError> {
         let mut title = String::new();
+        let mut id = String::new();
         let mut field_names = Vec::new();
         let mut mutable_field_names = Vec::new();
+        let mut editable_fields = Vec::new();
         let mut items = Vec::new();
         let mut cursor: Option<String> = None;
 
@@ -198,9 +270,11 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
 
             let page = decode_project(&response.body)?;
             if title.is_empty() {
+                id = page.id;
                 title = page.title;
                 field_names = page.field_names;
                 mutable_field_names = page.mutable_field_names;
+                editable_fields = page.editable_fields;
             }
             items.extend(page.items);
             if page.has_next_page {
@@ -214,11 +288,66 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
         }
 
         Ok(Project {
+            id,
             title,
             field_names,
             mutable_field_names,
+            editable_fields,
             items,
         })
+    }
+
+    #[cfg(feature = "tui")]
+    fn update_field(
+        &self,
+        project_id: &str,
+        item_id: &str,
+        field_id: &str,
+        value: FieldValue,
+        token: &str,
+    ) -> Result<(), DynError> {
+        let value = match value {
+            FieldValue::Text(value) => serde_json::json!({ "text": value }),
+            FieldValue::Number(value) => serde_json::json!({ "number": value }),
+            FieldValue::Date(value) => serde_json::json!({ "date": value }),
+            FieldValue::SingleSelect(value) => {
+                serde_json::json!({ "singleSelectOptionId": value })
+            }
+            FieldValue::Iteration(value) => serde_json::json!({ "iterationId": value }),
+        };
+        let payload = serde_json::json!({
+            "query": UPDATE_FIELD_MUTATION,
+            "variables": {
+                "projectId": project_id,
+                "itemId": item_id,
+                "fieldId": field_id,
+                "value": value,
+            },
+        });
+        let response = self.transport.execute(token, &payload)?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!(
+                "GitHub GraphQL request failed with HTTP {}: {}",
+                response.status,
+                response_snippet(&response.body)
+            )
+            .into());
+        }
+        let response: MutationResponse = serde_json::from_str(&response.body)?;
+        if response.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "GitHub API error: {}",
+                response
+                    .errors
+                    .iter()
+                    .map(|error| error.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+            .into())
+        }
     }
 }
 
@@ -276,9 +405,11 @@ impl GraphQlTransport for ReqwestGraphQlTransport {
 }
 
 struct DecodedPage {
+    id: String,
     title: String,
     field_names: Vec<String>,
     mutable_field_names: Vec<String>,
+    editable_fields: Vec<EditableField>,
     items: Vec<Item>,
     has_next_page: bool,
     end_cursor: Option<String>,
@@ -306,14 +437,19 @@ fn decode_project(body: &str) -> Result<DecodedPage, DynError> {
         .ok_or_else(|| "project not found (check the project URL and your token)".to_string())?;
     let fields = project.fields.nodes;
     Ok(DecodedPage {
+        id: project.id,
         title: project.title,
         field_names: fields
             .iter()
             .filter_map(|field| (field.name != "Title").then_some(field.name.clone()))
             .collect(),
         mutable_field_names: fields
+            .iter()
+            .filter_map(|field| field.editable().map(|field| field.name))
+            .collect(),
+        editable_fields: fields
             .into_iter()
-            .filter_map(|field| field.is_mutable().then_some(field.name))
+            .filter_map(|field| field.editable())
             .collect(),
         items: project.items.nodes.into_iter().map(Item::from).collect(),
         has_next_page: project.items.page_info.has_next_page,
@@ -394,6 +530,8 @@ struct OwnerData {
 #[serde(rename_all = "camelCase")]
 struct ProjectData {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     title: String,
     #[serde(default)]
     fields: FieldsConnection,
@@ -413,18 +551,75 @@ struct ProjectFieldData {
     kind: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    id: String,
     #[serde(default, rename = "dataType")]
     data_type: String,
+    #[serde(default)]
+    options: Vec<FieldOptionData>,
+    #[serde(default)]
+    configuration: IterationConfigurationData,
 }
 
 impl ProjectFieldData {
-    fn is_mutable(&self) -> bool {
-        matches!(
-            self.kind.as_str(),
-            "ProjectV2IterationField" | "ProjectV2SingleSelectField"
-        ) || (self.kind == "ProjectV2Field"
-            && matches!(self.data_type.as_str(), "DATE" | "NUMBER" | "TEXT"))
+    fn editable(&self) -> Option<EditableField> {
+        let kind = match (self.kind.as_str(), self.data_type.as_str()) {
+            ("ProjectV2Field", "TEXT") => EditableFieldKind::Text,
+            ("ProjectV2Field", "NUMBER") => EditableFieldKind::Number,
+            ("ProjectV2Field", "DATE") => EditableFieldKind::Date,
+            ("ProjectV2SingleSelectField", _) => EditableFieldKind::SingleSelect,
+            ("ProjectV2IterationField", _) => EditableFieldKind::Iteration,
+            _ => return None,
+        };
+        let options = match kind {
+            EditableFieldKind::Iteration => self
+                .configuration
+                .iterations
+                .iter()
+                .chain(&self.configuration.completed_iterations)
+                .map(FieldOption::from)
+                .collect(),
+            _ => self.options.iter().map(FieldOption::from).collect(),
+        };
+        Some(EditableField {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            kind,
+            options,
+        })
     }
+}
+
+#[derive(Default, Deserialize)]
+struct FieldOptionData {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    title: String,
+}
+
+impl From<&FieldOptionData> for FieldOption {
+    fn from(option: &FieldOptionData) -> Self {
+        Self {
+            id: option.id.clone(),
+            name: if option.name.is_empty() {
+                option.title.clone()
+            } else {
+                option.name.clone()
+            },
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IterationConfigurationData {
+    #[serde(default)]
+    iterations: Vec<FieldOptionData>,
+    #[serde(default)]
+    completed_iterations: Vec<FieldOptionData>,
 }
 
 #[derive(Default, Deserialize)]
@@ -448,6 +643,8 @@ struct PageInfo {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ItemData {
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     field_values: FieldValuesConnection,
     #[serde(default)]
@@ -533,19 +730,44 @@ impl From<ItemData> for Item {
             .into_iter()
             .filter_map(field_value)
             .collect();
-        Self { content, fields }
+        Self {
+            id: data.id,
+            content,
+            fields,
+        }
     }
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+struct MutationResponse {
+    #[serde(default)]
+    errors: Vec<ApiError>,
 }
 
 #[cfg(test)]
 pub(crate) mod testing {
     use std::cell::RefCell;
 
+    #[cfg(feature = "tui")]
+    use super::FieldValue;
     use super::{DynError, Project, ProjectRef, ProjectSource};
+
+    #[cfg(feature = "tui")]
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct UpdateRequest {
+        pub(crate) project_id: String,
+        pub(crate) item_id: String,
+        pub(crate) field_id: String,
+        pub(crate) value: FieldValue,
+        pub(crate) token: String,
+    }
 
     pub(crate) struct MockProjectSource {
         result: Result<Project, String>,
         requests: RefCell<Vec<(ProjectRef, String)>>,
+        #[cfg(feature = "tui")]
+        updates: RefCell<Vec<UpdateRequest>>,
     }
 
     impl MockProjectSource {
@@ -553,6 +775,8 @@ pub(crate) mod testing {
             Self {
                 result: Ok(project),
                 requests: RefCell::default(),
+                #[cfg(feature = "tui")]
+                updates: RefCell::default(),
             }
         }
 
@@ -560,11 +784,18 @@ pub(crate) mod testing {
             Self {
                 result: Err(message.into()),
                 requests: RefCell::default(),
+                #[cfg(feature = "tui")]
+                updates: RefCell::default(),
             }
         }
 
         pub(crate) fn requests(&self) -> Vec<(ProjectRef, String)> {
             self.requests.borrow().clone()
+        }
+
+        #[cfg(feature = "tui")]
+        pub(crate) fn updates(&self) -> Vec<UpdateRequest> {
+            self.updates.borrow().clone()
         }
     }
 
@@ -578,6 +809,25 @@ pub(crate) mod testing {
                 .borrow_mut()
                 .push((project_ref.clone(), token.to_string()));
             self.result.clone().map_err(Into::into)
+        }
+
+        #[cfg(feature = "tui")]
+        fn update_field(
+            &self,
+            project_id: &str,
+            item_id: &str,
+            field_id: &str,
+            value: FieldValue,
+            token: &str,
+        ) -> Result<(), DynError> {
+            self.updates.borrow_mut().push(UpdateRequest {
+                project_id: project_id.into(),
+                item_id: item_id.into(),
+                field_id: field_id.into(),
+                value,
+                token: token.into(),
+            });
+            Ok(())
         }
     }
 }
@@ -682,15 +932,23 @@ mod tests {
         let response = serde_json::json!({
             "data": { "organization": { "project": {
                 "title": "My Project",
+                "id": "project-id",
                 "fields": { "nodes": [
-                    { "name": "Title" },
-                    { "name": "Status" },
-                    { "name": "Estimate" },
-                    { "name": "Release notes" }
+                    { "__typename": "ProjectV2Field", "id": "title", "name": "Title", "dataType": "TITLE" },
+                    { "__typename": "ProjectV2SingleSelectField", "id": "status", "name": "Status", "options": [
+                        { "id": "todo", "name": "Todo" }, { "id": "done", "name": "Done" }
+                    ] },
+                    { "__typename": "ProjectV2Field", "id": "estimate", "name": "Estimate", "dataType": "NUMBER" },
+                    { "__typename": "ProjectV2Field", "id": "notes", "name": "Release notes", "dataType": "TEXT" },
+                    { "__typename": "ProjectV2IterationField", "id": "sprint", "name": "Sprint", "configuration": {
+                        "iterations": [{ "id": "sprint-1", "title": "Sprint 1" }],
+                        "completedIterations": [{ "id": "sprint-0", "title": "Sprint 0" }]
+                    } }
                 ] },
                 "items": {
                     "pageInfo": { "hasNextPage": false, "endCursor": null },
                     "nodes": [{
+                        "id": "item-id",
                         "fieldValues": { "nodes": [
                             { "__typename": "ProjectV2ItemFieldTextValue", "field": { "name": "Title" }, "text": "Fix" },
                             { "__typename": "ProjectV2ItemFieldSingleSelectValue", "field": { "name": "Status" }, "name": "Done" },
@@ -705,7 +963,18 @@ mod tests {
         let page = decode_project(&response.to_string()).unwrap();
 
         assert_eq!(page.title, "My Project");
-        assert_eq!(page.field_names, ["Status", "Estimate", "Release notes"]);
+        assert_eq!(
+            page.field_names,
+            ["Status", "Estimate", "Release notes", "Sprint"]
+        );
+        assert_eq!(page.items[0].id, "item-id");
+        assert_eq!(
+            page.editable_fields[0].kind,
+            EditableFieldKind::SingleSelect
+        );
+        assert_eq!(page.editable_fields[0].options[1].name, "Done");
+        assert_eq!(page.editable_fields[3].kind, EditableFieldKind::Iteration);
+        assert_eq!(page.editable_fields[3].options[0].id, "sprint-1");
         assert_eq!(
             page.items[0].fields,
             [
@@ -737,6 +1006,39 @@ mod tests {
         let query = requests[0].1["query"].as_str().unwrap();
         assert!(query.contains("organization(login: $owner)"));
         assert!(!query.contains("resource(url:"));
+    }
+
+    #[test]
+    fn updates_project_field_with_typed_mutation_value() {
+        let source = GitHubProjectSource {
+            transport: FakeTransport::with_responses([GraphQlResponse {
+                status: 200,
+                body: r#"{ "data": { "updateProjectV2ItemFieldValue": { "projectV2Item": { "id": "item" } } } }"#.into(),
+            }]),
+        };
+
+        source
+            .update_field(
+                "project",
+                "item",
+                "status",
+                FieldValue::SingleSelect("done".into()),
+                "secret",
+            )
+            .unwrap();
+
+        let requests = source.transport.requests.borrow();
+        assert_eq!(requests[0].0, "secret");
+        assert_eq!(requests[0].1["variables"]["projectId"], "project");
+        assert_eq!(requests[0].1["variables"]["itemId"], "item");
+        assert_eq!(
+            requests[0].1["variables"]["value"],
+            serde_json::json!({ "singleSelectOptionId": "done" })
+        );
+        assert!(requests[0].1["query"]
+            .as_str()
+            .unwrap()
+            .contains("updateProjectV2ItemFieldValue"));
     }
 
     #[test]

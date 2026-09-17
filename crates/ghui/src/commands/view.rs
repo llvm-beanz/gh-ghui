@@ -154,11 +154,14 @@ mod tests {
 
     fn sample_project() -> Project {
         Project {
+            id: "project-id".into(),
             title: "Demo".into(),
             field_names: vec!["Status".into(), "Estimate".into()],
             mutable_field_names: vec!["Status".into(), "Estimate".into()],
+            editable_fields: vec![],
             items: vec![
                 Item {
+                    id: "item-1".into(),
                     content: Some(Content {
                         kind: Kind::Issue,
                         number: Some(42),
@@ -171,6 +174,7 @@ mod tests {
                     ],
                 },
                 Item {
+                    id: "item-2".into(),
                     content: Some(Content {
                         kind: Kind::PullRequest,
                         number: Some(7),
@@ -251,10 +255,13 @@ mod tests {
     #[test]
     fn render_table_handles_missing_content_and_empty_projects() {
         let project = Project {
+            id: "project-id".into(),
             title: "P".into(),
             field_names: vec!["Status".into()],
             mutable_field_names: vec!["Status".into()],
+            editable_fields: vec![],
             items: vec![Item {
+                id: "item-id".into(),
                 content: None,
                 fields: vec![("Status".into(), "Todo".into())],
             }],
@@ -266,9 +273,11 @@ mod tests {
             .starts_with('-'));
         assert_eq!(
             render_table(&Project {
+                id: "project-id".into(),
                 title: "Empty".into(),
                 field_names: vec![],
                 mutable_field_names: vec![],
+                editable_fields: vec![],
                 items: vec![],
             })
             .lines()
