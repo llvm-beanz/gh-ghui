@@ -23,6 +23,14 @@ pub enum Command {
         /// URL of the GitHub project (e.g. https://github.com/orgs/hlsl-tc57/projects/1).
         #[arg(value_name = "URL")]
         url: String,
+
+        /// GitHub Projects-style filter expression.
+        #[arg(short, long, value_name = "EXPRESSION")]
+        filter: Option<String>,
+
+        /// Field to sort by, optionally followed by :asc or :desc.
+        #[arg(short, long, value_name = "FIELD[:asc|desc]")]
+        sort: Option<String>,
     },
 
     /// Launch the interactive terminal UI.
@@ -53,6 +61,26 @@ mod tests {
             with_url.command,
             Some(Command::Tui { target: Some(target) })
                 if target == "https://github.com/orgs/example/projects/1"
+        ));
+    }
+
+    #[test]
+    fn view_accepts_filter_and_sort_options() {
+        let cli = Cli::try_parse_from([
+            "ghui",
+            "view",
+            "--filter",
+            "is:issue status:\"In Progress\"",
+            "--sort",
+            "Priority:desc",
+            "https://github.com/orgs/example/projects/1",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::View { filter: Some(filter), sort: Some(sort), .. })
+                if filter == "is:issue status:\"In Progress\"" && sort == "Priority:desc"
         ));
     }
 }

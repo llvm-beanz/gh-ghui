@@ -6,14 +6,22 @@ use unicode_width::UnicodeWidthStr;
 
 use super::login;
 use crate::github::{
-    emoji_status, parse_project_url, DynError, GitHubProjectSource, Item, Kind, Project,
-    ProjectSource, STATUS_COLUMN,
+    emoji_status, parse_project_url, DynError, GitHubProjectSource, Item, Kind, ProjectSource,
+    STATUS_COLUMN,
 };
+use crate::query::{select_items, FilterExpression, SortSpec};
 
 /// Run the `view` command: resolve the URL, fetch the project, print the table.
-pub fn run(url: &str) -> Result<(), DynError> {
+pub fn run(url: &str, filter: Option<&str>, sort: Option<&str>) -> Result<(), DynError> {
     let source = GitHubProjectSource::new()?;
-    execute_view(url, &SystemTokenProvider, &source, &mut io::stdout())
+    execute_view(
+        url,
+        filter,
+        sort,
+        &SystemTokenProvider,
+        &source,
+        &mut io::stdout(),
+    )
 }
 
 trait TokenProvider {
@@ -33,28 +41,34 @@ impl TokenProvider for SystemTokenProvider {
 
 fn execute_view(
     url: &str,
+    filter: Option<&str>,
+    sort: Option<&str>,
     token_provider: &dyn TokenProvider,
     source: &dyn ProjectSource,
     output: &mut dyn Write,
 ) -> Result<(), DynError> {
+    let filter = filter.map(FilterExpression::parse).transpose()?;
+    let sort = sort.map(SortSpec::parse).transpose()?;
     let project_ref = parse_project_url(url)?;
     let token = token_provider
         .token()
         .ok_or("no GitHub token found; set GITHUB_TOKEN or run `ghui login`")?;
     let project = source.fetch_project(&project_ref, &token)?;
+    let items = select_items(&project.items, filter.as_ref(), sort.as_ref());
 
     writeln!(
         output,
-        "Project: {} ({} items)",
+        "Project: {} ({} of {} items)",
         project.title,
+        items.len(),
         project.items.len()
     )?;
-    writeln!(output, "{}", render_table(&project))?;
+    writeln!(output, "{}", render_table(&items))?;
     Ok(())
 }
 
-fn render_table(project: &Project) -> String {
-    let columns = field_columns(&project.items);
+fn render_table(items: &[&Item]) -> String {
+    let columns = field_columns(items);
     let mut header: Vec<String> = vec![
         STATUS_COLUMN.into(),
         "#".into(),
@@ -63,8 +77,7 @@ fn render_table(project: &Project) -> String {
     ];
     header.extend(columns.iter().cloned());
 
-    let rows: Vec<Vec<String>> = project
-        .items
+    let rows: Vec<Vec<String>> = items
         .iter()
         .map(|item| {
             let number = item
@@ -135,7 +148,7 @@ fn render_table(project: &Project) -> String {
     output.join("\n")
 }
 
-fn field_columns(items: &[Item]) -> Vec<String> {
+fn field_columns(items: &[&Item]) -> Vec<String> {
     let mut columns = Vec::new();
     for item in items {
         for (name, _) in &item.fields {
@@ -159,7 +172,7 @@ fn kind_label(item: &Item) -> &'static str {
 mod tests {
     use super::*;
     use crate::github::testing::MockProjectSource;
-    use crate::github::Content;
+    use crate::github::{Content, Project};
 
     struct FixedToken(Option<String>);
 
@@ -211,6 +224,10 @@ mod tests {
         }
     }
 
+    fn render_project(project: &Project) -> String {
+        render_table(&project.items.iter().collect::<Vec<_>>())
+    }
+
     #[test]
     fn execute_view_uses_injected_dependencies() {
         let source = MockProjectSource::returning(sample_project());
@@ -218,6 +235,8 @@ mod tests {
 
         execute_view(
             "https://github.com/orgs/example/projects/1",
+            None,
+            None,
             &FixedToken(Some("token".into())),
             &source,
             &mut output,
@@ -225,7 +244,7 @@ mod tests {
         .unwrap();
 
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("Project: Demo (2 items)"));
+        assert!(output.contains("Project: Demo (2 of 2 items)"));
         assert!(output.contains("Fix the thing"));
         assert_eq!(source.requests()[0].1, "token");
     }
@@ -235,6 +254,8 @@ mod tests {
         let mut output = Vec::new();
         let error = execute_view(
             "https://github.com/orgs/example/projects/1",
+            None,
+            None,
             &FixedToken(None),
             &MockProjectSource::returning(sample_project()),
             &mut output,
@@ -250,6 +271,8 @@ mod tests {
         let source = MockProjectSource::failing("request failed");
         let error = execute_view(
             "https://github.com/orgs/example/projects/1",
+            None,
+            None,
             &FixedToken(Some("token".into())),
             &source,
             &mut Vec::new(),
@@ -262,7 +285,7 @@ mod tests {
 
     #[test]
     fn render_table_columns_and_rows() {
-        let table = render_table(&sample_project());
+        let table = render_project(&sample_project());
         let lines: Vec<&str> = table.lines().collect();
         assert_eq!(lines.len(), 4);
         assert_eq!(
@@ -290,9 +313,9 @@ mod tests {
                 fields: vec![("Status".into(), "Todo".into())],
             }],
         };
-        assert!(collapse_spaces(render_table(&project).lines().nth(2).unwrap()).starts_with('-'));
+        assert!(collapse_spaces(render_project(&project).lines().nth(2).unwrap()).starts_with('-'));
         assert_eq!(
-            render_table(&Project {
+            render_project(&Project {
                 id: "project-id".into(),
                 title: "Empty".into(),
                 field_names: vec![],
@@ -304,6 +327,27 @@ mod tests {
             .count(),
             2
         );
+    }
+
+    #[test]
+    fn execute_view_filters_and_sorts_items() {
+        let source = MockProjectSource::returning(sample_project());
+        let mut output = Vec::new();
+
+        execute_view(
+            "https://github.com/orgs/example/projects/1",
+            Some("is:issue status:\"In Progress\""),
+            Some("Estimate:desc"),
+            &FixedToken(Some("token".into())),
+            &source,
+            &mut output,
+        )
+        .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Project: Demo (1 of 2 items)"));
+        assert!(output.contains("Fix the thing"));
+        assert!(!output.contains("Add feature"));
     }
 
     fn collapse_spaces(line: &str) -> String {

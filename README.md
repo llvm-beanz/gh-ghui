@@ -27,6 +27,7 @@ cargo run -- --help
 cargo run -- login
 cargo run -- --verbose login
 cargo run -- view https://github.com/orgs/hlsl-tc57/projects/1
+cargo run -- view --filter 'is:issue status:"In Progress"' --sort Priority:desc https://github.com/orgs/hlsl-tc57/projects/1
 cargo run -- tui
 ```
 

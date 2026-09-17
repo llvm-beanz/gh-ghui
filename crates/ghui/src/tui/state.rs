@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::github::DynError;
 
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewState {
@@ -13,6 +13,10 @@ pub struct ViewState {
     pub selected: Option<usize>,
     #[serde(default)]
     pub columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub filter: Option<String>,
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -22,6 +26,8 @@ impl ViewState {
             project_url,
             selected,
             columns: None,
+            filter: None,
+            sort: None,
         }
     }
 }
@@ -81,12 +87,15 @@ impl SessionState {
                         project_url: legacy.project_url,
                         selected: legacy.selected,
                         columns: legacy.columns,
+                        filter: None,
+                        sort: None,
                     }],
                     active_tab: 0,
                 })
             }
-            Some(version) if version == u64::from(CURRENT_VERSION) => {
+            Some(version) if version == 2 || version == u64::from(CURRENT_VERSION) => {
                 let mut state: Self = serde_json::from_value(value)?;
+                state.version = CURRENT_VERSION;
                 if state.tabs.is_empty() {
                     state.tabs.push(ViewState::default());
                 }
@@ -131,12 +140,16 @@ mod tests {
     fn state_round_trips_as_readable_text() {
         let mut state = sample_state();
         state.tabs[0].columns = Some(vec!["Title".into(), "Status".into()]);
+        state.tabs[0].filter = Some("is:issue status:todo".into());
+        state.tabs[0].sort = Some("Priority:desc".into());
 
         let text = state.to_text().unwrap();
 
         assert!(text.contains("\"project_url\""));
         assert!(text.contains("https://github.com/orgs/example/projects/1"));
         assert!(text.contains("\"columns\""));
+        assert!(text.contains("\"filter\""));
+        assert!(text.contains("\"sort\""));
         assert_eq!(SessionState::from_text(&text).unwrap(), state);
     }
 
@@ -147,6 +160,21 @@ mod tests {
                 .unwrap();
 
         assert_eq!(state.tabs[0].columns, None);
+        assert_eq!(state.tabs[0].filter, None);
+        assert_eq!(state.tabs[0].sort, None);
+    }
+
+    #[test]
+    fn version_two_state_migrates_without_filter_or_sort() {
+        let state = SessionState::from_text(
+            r#"{ "version": 2, "tabs": [{ "project_url": null, "selected": 1, "columns": null }], "active_tab": 0 }"#,
+        )
+        .unwrap();
+
+        assert_eq!(state.tabs[0].selected, Some(1));
+        assert_eq!(state.tabs[0].filter, None);
+        assert_eq!(state.tabs[0].sort, None);
+        assert!(state.to_text().unwrap().contains("\"version\": 3"));
     }
 
     #[test]

@@ -36,6 +36,26 @@ columns, and the active tab.
 See the [TUI reference](tui-reference.md) for the complete command and shortcut
 list.
 
+## Filtering and sorting
+
+Use `--filter` with `ghui view` to apply a GitHub Projects-style filter, and
+`--sort` to order the matching items:
+
+```sh
+ghui view --filter 'is:issue status:"In Progress" -label:duplicate' --sort Priority:desc URL
+```
+
+Filters support field values, quoted values, comma-separated alternatives,
+negation, `has:`, `no:`, `is:`, `reason:`, general text, `*` wildcards,
+numeric/date comparisons, and inclusive `..` ranges. Multiple clauses are
+combined with AND. The relative GitHub keywords `@me`, `@today`, `@current`,
+`@previous`, and `@next` are not currently supported.
+
+Sort specifications use `FIELD`, `FIELD:asc`, or `FIELD:desc`. Missing values
+sort after populated values. In the TUI, use `:filter EXPRESSION` and
+`:sort FIELD[:asc|desc]`; use bare `:filter` or `:sort` to clear them. Filter
+and sort settings are stored independently for each saved tab.
+
 ## Permissions
 
 Login requests the read-only `read:project` and `read:org` OAuth scopes.

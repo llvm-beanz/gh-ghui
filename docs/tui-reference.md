@@ -154,6 +154,10 @@ Press `:` in normal mode, type a command without the leading colon, and press
 | `:columns` | Open the columns menu for the active tab |
 | `:refresh` | Refresh the active tab's project from GitHub |
 | `:legend` or `:emoji` | Open the item status emoji legend |
+| `:filter EXPRESSION` | Apply a GitHub Projects-style filter to the active tab |
+| `:filter` | Clear the active tab's filter |
+| `:sort FIELD[:asc\|desc]` | Sort the active tab by a field (ascending by default) |
+| `:sort` | Clear the active tab's sort |
 | `:tabnew` | Duplicate the active project and view in a new tab |
 | `:tabnew URL` | Open a GitHub project in a new tab |
 | `:tabnext` or `:tabn` | Switch to the next tab |
@@ -161,6 +165,19 @@ Press `:` in normal mode, type a command without the leading colon, and press
 | `:tabclose` or `:tabc` | Close the active tab |
 
 Closing the only tab resets it to an empty tab rather than closing the TUI.
+
+### Filter expressions
+
+Filters support field values (`status:done`), quoted values
+(`status:"In Progress"`), comma-separated alternatives (`label:bug,docs`),
+negation (`-label:duplicate`), `has:`, `no:`, `is:`, `reason:`, general text,
+`*` wildcards, comparisons (`points:>=3`), and inclusive ranges
+(`points:1..5`). Multiple clauses are combined with AND. Relative keywords
+such as `@me`, `@today`, and `@current` are not currently supported.
+
+Sort specifications use a field name with an optional `:asc` or `:desc`.
+Missing values sort after populated values. Filters and sorting apply only to
+the active tab and are included in saved sessions.
 
 ### Command history
 

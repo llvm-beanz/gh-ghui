@@ -25,6 +25,7 @@ use crate::github::{
     emoji_status, parse_project_url, DynError, EditableField, EditableFieldKind, FieldValue,
     GitHubProjectSource, Item, Kind, Project, ProjectSource, STATUS_COLUMN,
 };
+use crate::query::{select_items, FilterExpression, SortSpec};
 use state::{SessionState, ViewState};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -328,6 +329,41 @@ impl App {
             return None;
         }
 
+        if command == "filter" {
+            self.view_mut().filter = None;
+            self.view_mut().selected = self.last_item_index().map(|_| 0);
+            self.message = Some("Filter cleared".into());
+            return None;
+        }
+        if let Some(expression) = command.strip_prefix("filter ").map(str::trim) {
+            match FilterExpression::parse(expression) {
+                Ok(_) => {
+                    self.view_mut().filter = Some(expression.to_string());
+                    self.view_mut().selected = self.last_item_index().map(|_| 0);
+                    self.message = Some(format!("Filter: {expression}"));
+                }
+                Err(error) => self.show_error(error),
+            }
+            return None;
+        }
+        if command == "sort" {
+            self.view_mut().sort = None;
+            self.view_mut().selected = self.last_item_index().map(|_| 0);
+            self.message = Some("Sort cleared".into());
+            return None;
+        }
+        if let Some(specification) = command.strip_prefix("sort ").map(str::trim) {
+            match SortSpec::parse(specification) {
+                Ok(_) => {
+                    self.view_mut().sort = Some(specification.to_string());
+                    self.view_mut().selected = self.last_item_index().map(|_| 0);
+                    self.message = Some(format!("Sort: {specification}"));
+                }
+                Err(error) => self.show_error(error),
+            }
+            return None;
+        }
+
         if command == "columns" {
             if self.project().is_some() {
                 self.column_selected = 0;
@@ -419,8 +455,18 @@ impl App {
     }
 
     fn last_item_index(&self) -> Option<usize> {
-        self.project()
-            .and_then(|project| project.items.len().checked_sub(1))
+        self.visible_items().len().checked_sub(1)
+    }
+
+    fn visible_items(&self) -> Vec<&Item> {
+        let Some(project) = self.project() else {
+            return Vec::new();
+        };
+        select_view_items(project, self.view())
+    }
+
+    fn selected_item(&self) -> Option<&Item> {
+        self.visible_items().get(self.view().selected?).copied()
     }
 
     fn available_columns(&self) -> Vec<String> {
@@ -511,9 +557,7 @@ impl App {
             return;
         };
         let current = self
-            .view()
-            .selected
-            .and_then(|index| project.items.get(index))
+            .selected_item()
             .and_then(|item| item.fields.iter().find(|(name, _)| name == field_name))
             .map(|(_, value)| value.clone())
             .unwrap_or_default();
@@ -539,7 +583,7 @@ impl App {
 
     fn field_update_action(&mut self) -> Option<Action> {
         let project = self.project()?;
-        let item = project.items.get(self.view().selected?)?;
+        let item = self.selected_item()?;
         let (field, value, display_value) = match self.field_editor.as_ref()? {
             FieldEditor::Input { field, value } => {
                 let parsed = match field.kind {
@@ -860,12 +904,12 @@ fn refresh_project(app: &mut App, token_provider: &dyn TokenProvider, source: &d
     });
     match result {
         Ok(project) => {
-            let selected = match (app.view().selected, project.items.len().checked_sub(1)) {
+            let selected = app.view().selected;
+            app.tab_mut().project = Some(project);
+            app.view_mut().selected = match (selected, app.last_item_index()) {
                 (Some(selected), Some(last_index)) => Some(selected.min(last_index)),
                 _ => None,
             };
-            app.tab_mut().project = Some(project);
-            app.view_mut().selected = selected;
             app.leave_transient_mode();
             app.message = Some("Project refreshed".into());
         }
@@ -958,8 +1002,16 @@ fn update_field(
                         .push((update.field_name.clone(), update.display_value));
                 }
             }
+            app.view_mut().selected = match (app.view().selected, app.last_item_index()) {
+                (Some(selected), Some(last_index)) => Some(selected.min(last_index)),
+                _ => None,
+            };
             app.field_editor = None;
-            app.mode = Mode::Active;
+            app.mode = if app.view().selected.is_some() {
+                Mode::Active
+            } else {
+                Mode::Normal
+            };
             app.message = Some(format!("Updated {}", update.field_name));
         }
         Err(error) => app.show_error(error.to_string()),
@@ -982,8 +1034,8 @@ fn open_project(
     match result {
         Ok(project) => {
             app.view_mut().project_url = Some(url.to_string());
-            app.view_mut().selected = (!project.items.is_empty()).then_some(0);
             app.tab_mut().project = Some(project);
+            app.view_mut().selected = app.last_item_index().map(|_| 0);
             app.message = None;
         }
         Err(error) => app.show_error(error.to_string()),
@@ -1059,6 +1111,7 @@ fn render(frame: &mut Frame, app: &App) {
             frame,
             content_area,
             project,
+            app.view(),
             app.view().selected,
             app.view().columns.as_deref(),
             (app.mode == Mode::Active)
@@ -1121,13 +1174,16 @@ fn render_project(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
     project: &Project,
+    view: &ViewState,
     selected: Option<usize>,
     enabled_columns: Option<&[String]>,
     active_column: Option<&str>,
 ) {
+    let items = select_view_items(project, view);
     let block = Block::default().borders(Borders::ALL).title(format!(
-        " {} - {} items ",
+        " {} - {} of {} items ",
         project.title,
+        items.len(),
         project.items.len()
     ));
     let inner = block.inner(area);
@@ -1135,7 +1191,7 @@ fn render_project(
 
     let [header_area, rows_area] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
-    let table = project_table(project, enabled_columns, selected, active_column);
+    let table = project_table(project, &items, enabled_columns, selected, active_column);
     frame.render_widget(Paragraph::new(table.header), header_area);
     let mut rows = List::new(table.rows);
     if active_column.is_none() {
@@ -1270,6 +1326,7 @@ struct ProjectTable {
 
 fn project_table(
     project: &Project,
+    items: &[&Item],
     enabled_columns: Option<&[String]>,
     selected: Option<usize>,
     active_column: Option<&str>,
@@ -1281,8 +1338,7 @@ fn project_table(
         .collect::<Vec<_>>();
     let header = columns.clone();
 
-    let rows: Vec<Vec<String>> = project
-        .items
+    let rows: Vec<Vec<String>> = items
         .iter()
         .map(|item| {
             let number = item
@@ -1385,6 +1441,18 @@ fn project_table(
         })
         .collect();
     ProjectTable { header, rows }
+}
+
+fn select_view_items<'a>(project: &'a Project, view: &ViewState) -> Vec<&'a Item> {
+    let filter = view
+        .filter
+        .as_deref()
+        .and_then(|expression| FilterExpression::parse(expression).ok());
+    let sort = view
+        .sort
+        .as_deref()
+        .and_then(|specification| SortSpec::parse(specification).ok());
+    select_items(&project.items, filter.as_ref(), sort.as_ref())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1668,6 +1736,38 @@ mod tests {
             Some(Action::PreviousTab)
         );
         assert_eq!(type_command(&mut app, "tabclose"), Some(Action::CloseTab));
+    }
+
+    #[test]
+    fn filter_and_sort_commands_control_visible_items() {
+        let mut app = app_with_project(sample_project(3), ViewState::default());
+
+        type_command(&mut app, "filter title:\"Issue 2\"");
+        assert_eq!(app.view().filter.as_deref(), Some("title:\"Issue 2\""));
+        assert_eq!(app.last_item_index(), Some(0));
+        assert_eq!(app.selected_item().unwrap().id, "item-1");
+
+        type_command(&mut app, "filter");
+        type_command(&mut app, "sort Title:desc");
+        assert_eq!(app.view().filter, None);
+        assert_eq!(app.view().sort.as_deref(), Some("Title:desc"));
+        assert_eq!(app.selected_item().unwrap().id, "item-2");
+
+        type_command(&mut app, "sort");
+        assert_eq!(app.view().sort, None);
+    }
+
+    #[test]
+    fn invalid_filter_keeps_existing_view_and_shows_error() {
+        let mut app = app_with_project(sample_project(1), ViewState::default());
+
+        type_command(&mut app, "filter status:\"unterminated");
+
+        assert_eq!(app.view().filter, None);
+        assert_eq!(
+            app.error_dialog.as_deref(),
+            Some("filter contains an unterminated quote")
+        );
     }
 
     #[test]
@@ -2165,7 +2265,7 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(screen.contains("Demo - 2 items"));
+        assert!(screen.contains("Demo - 2 of 2 items"));
         assert!(screen.contains("Issue 1"));
         assert!(screen.contains(":q"));
         assert!(screen.contains(concat!("ghui v", env!("CARGO_PKG_VERSION"))));

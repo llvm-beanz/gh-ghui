@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod github;
+mod query;
 
 #[cfg(feature = "tui")]
 mod tui;
@@ -27,7 +28,9 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match &cli.command {
         Some(Command::Login) => commands::login::run(cli.verbose),
-        Some(Command::View { url }) => commands::view::run(url),
+        Some(Command::View { url, filter, sort }) => {
+            commands::view::run(url, filter.as_deref(), sort.as_deref())
+        }
         #[cfg(feature = "tui")]
         Some(Command::Tui { target }) => tui::run(target.as_deref()),
         None => {
