@@ -1,5 +1,6 @@
 //! Interactive terminal UI, built on ratatui.
 
+mod history;
 pub mod state;
 
 use std::collections::HashMap;
@@ -37,6 +38,10 @@ struct RuntimeTab {
 struct App {
     mode: Mode,
     command: String,
+    command_history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: String,
+    history_dirty: bool,
     tabs: Vec<RuntimeTab>,
     active_tab: usize,
     state_path: Option<PathBuf>,
@@ -53,6 +58,10 @@ impl Default for App {
         Self {
             mode: Mode::default(),
             command: String::new(),
+            command_history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
+            history_dirty: false,
             tabs: vec![RuntimeTab::default()],
             active_tab: 0,
             state_path: None,
@@ -155,6 +164,8 @@ impl App {
         match key {
             KeyCode::Char(':') => {
                 self.command.clear();
+                self.history_index = None;
+                self.history_draft.clear();
                 self.message = None;
                 self.mode = Mode::Command;
             }
@@ -174,15 +185,27 @@ impl App {
         match key {
             KeyCode::Esc => {
                 self.command.clear();
+                self.history_index = None;
+                self.history_draft.clear();
                 self.mode = Mode::Normal;
                 None
             }
             KeyCode::Enter => self.execute_command(),
             KeyCode::Backspace => {
+                self.detach_history();
                 self.command.pop();
                 None
             }
+            KeyCode::Up => {
+                self.previous_command();
+                None
+            }
+            KeyCode::Down => {
+                self.next_command();
+                None
+            }
             KeyCode::Char(character) => {
+                self.detach_history();
                 self.command.push(character);
                 None
             }
@@ -266,7 +289,11 @@ impl App {
     fn execute_command(&mut self) -> Option<Action> {
         let command = self.command.trim().to_string();
         self.command.clear();
+        self.history_index = None;
+        self.history_draft.clear();
         self.mode = Mode::Normal;
+
+        self.history_dirty |= history::record(&mut self.command_history, command.clone());
 
         if command == "q" {
             self.should_quit = true;
@@ -330,6 +357,41 @@ impl App {
         };
         let selected = self.view().selected.unwrap_or_default();
         self.view_mut().selected = Some(selected.saturating_add_signed(amount).min(last_index));
+    }
+
+    fn previous_command(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+        let index = match self.history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft = self.command.clone();
+                self.command_history.len() - 1
+            }
+        };
+        self.history_index = Some(index);
+        self.command.clone_from(&self.command_history[index]);
+    }
+
+    fn next_command(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if index + 1 < self.command_history.len() {
+            let index = index + 1;
+            self.history_index = Some(index);
+            self.command.clone_from(&self.command_history[index]);
+        } else {
+            self.history_index = None;
+            self.command.clone_from(&self.history_draft);
+        }
+    }
+
+    fn detach_history(&mut self) {
+        if self.history_index.take().is_some() {
+            self.history_draft.clone_from(&self.command);
+        }
     }
 
     fn select_first(&mut self) {
@@ -661,6 +723,14 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
     let token_provider = SystemTokenProvider;
     let mut session = TerminalSession::start()?;
     let mut app = App::default();
+    let history_path = history::default_path();
+
+    if let Some(path) = history_path.as_deref() {
+        match history::load(path) {
+            Ok(entries) => app.command_history = entries,
+            Err(error) => app.show_error(format!("Could not load command history: {error}")),
+        }
+    }
 
     if let Some(target) = initial_target {
         edit_target_with_progress(
@@ -675,7 +745,9 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
     while !app.should_quit {
         session.terminal.draw(|frame| render(frame, &app))?;
         if let Event::Key(key) = event::read()? {
-            match app.handle_key(key) {
+            let action = app.handle_key(key);
+            persist_command_history(&mut app, history_path.as_deref());
+            match action {
                 Some(Action::Edit(target)) => edit_target_with_progress(
                     &mut session.terminal,
                     &mut app,
@@ -719,6 +791,17 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
     }
 
     Ok(())
+}
+
+fn persist_command_history(app: &mut App, path: Option<&Path>) {
+    if !app.history_dirty {
+        return;
+    }
+    app.history_dirty = false;
+    let Some(path) = path else { return };
+    if let Err(error) = history::save(path, &app.command_history) {
+        app.show_error(format!("Could not save command history: {error}"));
+    }
 }
 
 fn edit_target_with_progress(
@@ -1404,6 +1487,58 @@ mod tests {
         assert_eq!(type_command(&mut app, "q"), None);
 
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn command_history_browses_and_restores_draft() {
+        let mut app = App {
+            command_history: vec!["columns".into(), "refresh".into()],
+            ..Default::default()
+        };
+        app.handle_key(key(KeyCode::Char(':')));
+        app.handle_key(key(KeyCode::Char('q')));
+
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.command, "refresh");
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.command, "columns");
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.command, "columns");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.command, "refresh");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.command, "q");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.command, "q");
+    }
+
+    #[test]
+    fn editing_recalled_command_detaches_from_history() {
+        let mut app = App {
+            command_history: vec!["refres".into()],
+            ..Default::default()
+        };
+        app.handle_key(key(KeyCode::Char(':')));
+        app.handle_key(key(KeyCode::Up));
+
+        app.handle_key(key(KeyCode::Char('h')));
+        app.handle_key(key(KeyCode::Down));
+
+        assert_eq!(app.command, "refresh");
+        assert_eq!(app.history_index, None);
+    }
+
+    #[test]
+    fn executed_commands_are_recorded_once_when_consecutive() {
+        let mut app = App::default();
+
+        type_command(&mut app, "refresh");
+        assert!(app.history_dirty);
+        app.history_dirty = false;
+        type_command(&mut app, "refresh");
+
+        assert_eq!(app.command_history, ["refresh"]);
+        assert!(!app.history_dirty);
     }
 
     #[test]

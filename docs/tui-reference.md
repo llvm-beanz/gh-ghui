@@ -113,6 +113,14 @@ fields are listed with checkboxes. Column choices apply only to the active tab.
 Press `:` in normal mode, type a command without the leading colon, and press
 `Enter`. Press `Escape` to cancel command entry.
 
+| Shortcut | Action |
+| --- | --- |
+| `Up` | Recall the previous command |
+| `Down` | Recall the next command, or restore the command being typed |
+| `Backspace` | Delete the last character |
+| `Enter` | Execute the command |
+| `Escape` | Cancel command entry |
+
 | Command | Action |
 | --- | --- |
 | `:q` | Quit without saving session state |
@@ -129,6 +137,19 @@ Press `:` in normal mode, type a command without the leading colon, and press
 | `:tabclose` or `:tabc` | Close the active tab |
 
 Closing the only tab resets it to an empty tab rather than closing the TUI.
+
+### Command history
+
+Executed non-empty commands are saved immediately and remain available across
+TUI sessions. Consecutive duplicate commands are stored once, and the latest
+1,000 commands are retained. The history file defaults to:
+
+- Windows: `%APPDATA%\ghui\history.json`
+- macOS: `~/Library/Application Support/ghui/history.json`
+- Linux and other Unix systems: `$XDG_STATE_HOME/ghui/history.json`, or
+	`~/.local/state/ghui/history.json` when `XDG_STATE_HOME` is unset
+
+Set `GHUI_HISTORY_FILE` to use a different history file.
 
 ## Tabs and saved sessions
 
