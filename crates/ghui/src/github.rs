@@ -28,6 +28,11 @@ query GetProjectItems(
 
 fragment ProjectFields on ProjectV2 {
   title
+    fields(first: 100) {
+        nodes {
+            ... on ProjectV2FieldCommon { name }
+        }
+    }
   items(first: 100, after: $cursor) {
     pageInfo { hasNextPage endCursor }
     nodes {
@@ -103,6 +108,7 @@ pub(crate) struct Item {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Project {
     pub(crate) title: String,
+    pub(crate) field_names: Vec<String>,
     pub(crate) items: Vec<Item>,
 }
 
@@ -160,6 +166,7 @@ impl GitHubProjectSource<ReqwestGraphQlTransport> {
 impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
     fn fetch_project(&self, project_ref: &ProjectRef, token: &str) -> Result<Project, DynError> {
         let mut title = String::new();
+        let mut field_names = Vec::new();
         let mut items = Vec::new();
         let mut cursor: Option<String> = None;
 
@@ -187,6 +194,7 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
             let page = decode_project(&response.body)?;
             if title.is_empty() {
                 title = page.title;
+                field_names = page.field_names;
             }
             items.extend(page.items);
             if page.has_next_page {
@@ -199,7 +207,11 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
             }
         }
 
-        Ok(Project { title, items })
+        Ok(Project {
+            title,
+            field_names,
+            items,
+        })
     }
 }
 
@@ -258,6 +270,7 @@ impl GraphQlTransport for ReqwestGraphQlTransport {
 
 struct DecodedPage {
     title: String,
+    field_names: Vec<String>,
     items: Vec<Item>,
     has_next_page: bool,
     end_cursor: Option<String>,
@@ -285,6 +298,12 @@ fn decode_project(body: &str) -> Result<DecodedPage, DynError> {
         .ok_or_else(|| "project not found (check the project URL and your token)".to_string())?;
     Ok(DecodedPage {
         title: project.title,
+        field_names: project
+            .fields
+            .nodes
+            .into_iter()
+            .filter_map(|field| (field.name != "Title").then_some(field.name))
+            .collect(),
         items: project.items.nodes.into_iter().map(Item::from).collect(),
         has_next_page: project.items.page_info.has_next_page,
         end_cursor: project.items.page_info.end_cursor,
@@ -366,7 +385,15 @@ struct ProjectData {
     #[serde(default)]
     title: String,
     #[serde(default)]
+    fields: FieldsConnection,
+    #[serde(default)]
     items: ItemsConnection,
+}
+
+#[derive(Default, Deserialize)]
+struct FieldsConnection {
+    #[serde(default)]
+    nodes: Vec<FieldData>,
 }
 
 #[derive(Default, Deserialize)]
@@ -624,6 +651,12 @@ mod tests {
         let response = serde_json::json!({
             "data": { "organization": { "project": {
                 "title": "My Project",
+                "fields": { "nodes": [
+                    { "name": "Title" },
+                    { "name": "Status" },
+                    { "name": "Estimate" },
+                    { "name": "Release notes" }
+                ] },
                 "items": {
                     "pageInfo": { "hasNextPage": false, "endCursor": null },
                     "nodes": [{
@@ -641,6 +674,7 @@ mod tests {
         let page = decode_project(&response.to_string()).unwrap();
 
         assert_eq!(page.title, "My Project");
+        assert_eq!(page.field_names, ["Status", "Estimate", "Release notes"]);
         assert_eq!(
             page.items[0].fields,
             [

@@ -155,6 +155,7 @@ mod tests {
     fn sample_project() -> Project {
         Project {
             title: "Demo".into(),
+            field_names: vec!["Status".into(), "Estimate".into()],
             items: vec![
                 Item {
                     content: Some(Content {
@@ -250,6 +251,7 @@ mod tests {
     fn render_table_handles_missing_content_and_empty_projects() {
         let project = Project {
             title: "P".into(),
+            field_names: vec!["Status".into()],
             items: vec![Item {
                 content: None,
                 fields: vec![("Status".into(), "Todo".into())],
@@ -263,6 +265,7 @@ mod tests {
         assert_eq!(
             render_table(&Project {
                 title: "Empty".into(),
+                field_names: vec![],
                 items: vec![],
             })
             .lines()

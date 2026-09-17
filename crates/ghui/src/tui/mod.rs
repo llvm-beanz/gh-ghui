@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::commands::login;
@@ -33,6 +33,7 @@ struct App {
     project: Option<Project>,
     view_state: ViewState,
     state_path: Option<PathBuf>,
+    column_selected: usize,
     message: Option<String>,
     should_quit: bool,
 }
@@ -42,6 +43,7 @@ enum Mode {
     #[default]
     Normal,
     Command,
+    Columns,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,6 +67,7 @@ impl App {
         match self.mode {
             Mode::Normal => self.handle_normal_key(key.code),
             Mode::Command => self.handle_command_key(key.code),
+            Mode::Columns => self.handle_columns_key(key.code),
         }
     }
 
@@ -106,6 +109,26 @@ impl App {
         }
     }
 
+    fn handle_columns_key(&mut self, key: KeyCode) -> Option<Action> {
+        match key {
+            KeyCode::Esc | KeyCode::Enter => self.mode = Mode::Normal,
+            KeyCode::Char('j') | KeyCode::Down => {
+                let last = self.available_columns().len().saturating_sub(1);
+                self.column_selected = self.column_selected.saturating_add(1).min(last);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.column_selected = self.column_selected.saturating_sub(1);
+            }
+            KeyCode::Char(' ') => self.toggle_selected_column(),
+            KeyCode::Home | KeyCode::Char('g') => self.column_selected = 0,
+            KeyCode::End | KeyCode::Char('G') => {
+                self.column_selected = self.available_columns().len().saturating_sub(1);
+            }
+            _ => {}
+        }
+        None
+    }
+
     fn execute_command(&mut self) -> Option<Action> {
         let command = self.command.trim().to_string();
         self.command.clear();
@@ -122,6 +145,16 @@ impl App {
 
         if command == "wq" {
             return Some(Action::WriteQuit);
+        }
+
+        if command == "columns" {
+            if self.project.is_some() {
+                self.column_selected = 0;
+                self.mode = Mode::Columns;
+            } else {
+                self.message = Some("No project open".into());
+            }
+            return None;
         }
 
         if let Some(target) = command.strip_prefix("e ").map(str::trim) {
@@ -155,6 +188,35 @@ impl App {
         self.project
             .as_ref()
             .and_then(|project| project.items.len().checked_sub(1))
+    }
+
+    fn available_columns(&self) -> Vec<String> {
+        self.project
+            .as_ref()
+            .map(project_columns)
+            .unwrap_or_default()
+    }
+
+    fn toggle_selected_column(&mut self) {
+        let available = self.available_columns();
+        let Some(column) = available.get(self.column_selected) else {
+            return;
+        };
+        let enabled = self
+            .view_state
+            .columns
+            .get_or_insert_with(|| available.clone());
+        if enabled.contains(column) {
+            enabled.retain(|candidate| candidate != column);
+        } else {
+            enabled.push(column.clone());
+            enabled.sort_by_key(|candidate| {
+                available
+                    .iter()
+                    .position(|available| available == candidate)
+                    .unwrap_or(usize::MAX)
+            });
+        }
     }
 }
 
@@ -363,7 +425,13 @@ fn render(frame: &mut Frame, app: &App) {
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
 
     match &app.project {
-        Some(project) => render_project(frame, content_area, project, app.view_state.selected),
+        Some(project) => render_project(
+            frame,
+            content_area,
+            project,
+            app.view_state.selected,
+            app.view_state.columns.as_deref(),
+        ),
         None => frame.render_widget(
             Paragraph::new("No project open")
                 .block(Block::default().borders(Borders::ALL).title(" ghui ")),
@@ -371,18 +439,33 @@ fn render(frame: &mut Frame, app: &App) {
         ),
     }
 
+    let version = format!(" ghui v{} ", env!("CARGO_PKG_VERSION"));
+    let [status_content_area, version_area] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(version.chars().count() as u16),
+    ])
+    .areas(status_area);
     let status = match app.mode {
         Mode::Normal => normal_status(app.message.as_deref()),
         Mode::Command => Line::from(format!(":{}", app.command)),
+        Mode::Columns => Line::from(" COLUMNS  Space toggle  Enter/Esc close "),
     };
-    frame.render_widget(Paragraph::new(status), status_area);
+    frame.render_widget(Paragraph::new(status), status_content_area);
+    frame.render_widget(
+        Paragraph::new(version).alignment(ratatui::layout::Alignment::Right),
+        version_area,
+    );
 
     if app.mode == Mode::Command {
-        let cursor_x = status_area.x + 1 + app.command.chars().count() as u16;
+        let cursor_x = status_content_area.x + 1 + app.command.chars().count() as u16;
         frame.set_cursor_position((
-            cursor_x.min(status_area.right().saturating_sub(1)),
-            status_area.y,
+            cursor_x.min(status_content_area.right().saturating_sub(1)),
+            status_content_area.y,
         ));
+    }
+
+    if app.mode == Mode::Columns {
+        render_columns(frame, app);
     }
 }
 
@@ -391,6 +474,7 @@ fn render_project(
     area: ratatui::layout::Rect,
     project: &Project,
     selected: Option<usize>,
+    enabled_columns: Option<&[String]>,
 ) {
     let block = Block::default().borders(Borders::ALL).title(format!(
         " {} - {} items ",
@@ -402,12 +486,45 @@ fn render_project(
 
     let [header_area, rows_area] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
-    let table = project_table(project);
+    let table = project_table(project, enabled_columns);
     frame.render_widget(Paragraph::new(table.header), header_area);
     let rows =
         List::new(table.rows).highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(rows, rows_area, &mut state);
+}
+
+fn render_columns(frame: &mut Frame, app: &App) {
+    let area = centered_rect(50, 70, frame.area());
+    frame.render_widget(Clear, area);
+    let available = app.available_columns();
+    let items = available.iter().map(|column| {
+        let enabled = app
+            .view_state
+            .columns
+            .as_ref()
+            .is_none_or(|columns| columns.contains(column));
+        ListItem::new(format!("[{}] {column}", if enabled { "x" } else { " " }))
+    });
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Columns "))
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    let mut state = ListState::default().with_selected(Some(app.column_selected));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+    let [vertical] = Layout::vertical([Constraint::Percentage(percent_y)])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(area);
+    let [horizontal] = Layout::horizontal([Constraint::Percentage(percent_x)])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(vertical);
+    horizontal
 }
 
 fn normal_status(message: Option<&str>) -> Line<'static> {
@@ -429,10 +546,12 @@ struct ProjectTable {
     rows: Vec<ListItem<'static>>,
 }
 
-fn project_table(project: &Project) -> ProjectTable {
-    let columns = field_columns(&project.items);
-    let mut header: Vec<String> = vec!["#".into(), "Type".into(), "Title".into()];
-    header.extend(columns.iter().cloned());
+fn project_table(project: &Project, enabled_columns: Option<&[String]>) -> ProjectTable {
+    let columns = project_columns(project)
+        .into_iter()
+        .filter(|column| enabled_columns.is_none_or(|enabled| enabled.contains(column)))
+        .collect::<Vec<_>>();
+    let header = columns.clone();
 
     let rows: Vec<Vec<String>> = project
         .items
@@ -454,15 +573,19 @@ fn project_table(project: &Project) -> ProjectTable {
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_str()))
                 .collect();
-            let mut row = vec![number, kind_label(item).to_string(), title];
-            row.extend(columns.iter().map(|column| {
-                values
-                    .get(column.as_str())
-                    .copied()
-                    .unwrap_or_default()
-                    .to_string()
-            }));
-            row
+            columns
+                .iter()
+                .map(|column| match column.as_str() {
+                    "#" => number.clone(),
+                    "Type" => kind_label(item).to_string(),
+                    "Title" => title.clone(),
+                    _ => values
+                        .get(column.as_str())
+                        .copied()
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+                .collect()
         })
         .collect();
 
@@ -499,6 +622,17 @@ fn project_table(project: &Project) -> ProjectTable {
         .map(|row| ListItem::new(format_row(row)))
         .collect();
     ProjectTable { header, rows }
+}
+
+fn project_columns(project: &Project) -> Vec<String> {
+    let mut columns = vec!["#".into(), "Type".into(), "Title".into()];
+    columns.extend(project.field_names.iter().cloned());
+    for column in field_columns(&project.items) {
+        if !columns.contains(&column) {
+            columns.push(column);
+        }
+    }
+    columns
 }
 
 fn field_columns(items: &[Item]) -> Vec<String> {
@@ -554,6 +688,7 @@ mod tests {
     fn sample_project(item_count: usize) -> Project {
         Project {
             title: "Demo".into(),
+            field_names: vec!["Status".into()],
             items: (0..item_count)
                 .map(|index| Item {
                     content: Some(Content {
@@ -664,6 +799,68 @@ mod tests {
     }
 
     #[test]
+    fn columns_command_opens_checkbox_menu_and_toggles_columns() {
+        let mut project = sample_project(2);
+        project.field_names.push("Release notes".into());
+        let mut app = App {
+            project: Some(project),
+            ..Default::default()
+        };
+
+        assert_eq!(type_command(&mut app, "columns"), None);
+        assert_eq!(app.mode, Mode::Columns);
+        assert_eq!(
+            app.available_columns(),
+            vec!["#", "Type", "Title", "Status", "Release notes"]
+        );
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.view_state.columns,
+            Some(vec![
+                "Title".into(),
+                "Status".into(),
+                "Release notes".into()
+            ])
+        );
+    }
+
+    #[test]
+    fn columns_menu_renders_checkboxes_and_filters_project_table() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App {
+            mode: Mode::Columns,
+            project: Some(sample_project(2)),
+            view_state: {
+                let mut state = ViewState::default();
+                state.columns = Some(vec!["Title".into()]);
+                state
+            },
+            ..Default::default()
+        };
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("[ ] #"));
+        assert!(screen.contains("[x] Title"));
+        assert!(screen.contains("Issue 1"));
+        assert!(!screen.contains("Todo"));
+    }
+
+    #[test]
     fn escape_cancels_command() {
         let mut app = App::default();
         app.handle_key(key(KeyCode::Char(':')));
@@ -698,6 +895,7 @@ mod tests {
         assert!(screen.contains("Demo - 2 items"));
         assert!(screen.contains("Issue 1"));
         assert!(screen.contains(":q"));
+        assert!(screen.contains(concat!("ghui v", env!("CARGO_PKG_VERSION"))));
     }
 
     #[test]

@@ -12,6 +12,8 @@ pub struct ViewState {
     version: u32,
     pub project_url: Option<String>,
     pub selected: Option<usize>,
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
 }
 
 impl Default for ViewState {
@@ -20,6 +22,7 @@ impl Default for ViewState {
             version: CURRENT_VERSION,
             project_url: None,
             selected: None,
+            columns: None,
         }
     }
 }
@@ -31,6 +34,7 @@ impl ViewState {
             version: CURRENT_VERSION,
             project_url,
             selected,
+            columns: None,
         }
     }
 
@@ -75,13 +79,24 @@ mod tests {
 
     #[test]
     fn state_round_trips_as_readable_text() {
-        let state = sample_state();
+        let mut state = sample_state();
+        state.columns = Some(vec!["Title".into(), "Status".into()]);
 
         let text = state.to_text().unwrap();
 
         assert!(text.contains("\"project_url\""));
         assert!(text.contains("https://github.com/orgs/example/projects/1"));
+        assert!(text.contains("\"columns\""));
         assert_eq!(ViewState::from_text(&text).unwrap(), state);
+    }
+
+    #[test]
+    fn state_without_columns_enables_all_columns() {
+        let state =
+            ViewState::from_text(r#"{ "version": 1, "project_url": null, "selected": null }"#)
+                .unwrap();
+
+        assert_eq!(state.columns, None);
     }
 
     #[test]
