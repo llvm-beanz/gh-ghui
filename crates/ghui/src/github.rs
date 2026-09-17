@@ -43,7 +43,7 @@ fragment ProjectFields on ProjectV2 {
                         ... on ProjectV2SingleSelectField { id name options { id name } }
         }
     }
-  items(first: 100, after: $cursor) {
+    items(first: 40, after: $cursor) {
     pageInfo { hasNextPage endCursor }
     nodes {
             id
@@ -70,6 +70,51 @@ fragment ProjectFields on ProjectV2 {
             field { ... on ProjectV2FieldCommon { name } }
             title
           }
+                    ... on ProjectV2ItemFieldMultiSelectValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        options { name }
+                    }
+                    ... on ProjectV2ItemFieldRepositoryValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        repository { nameWithOwner }
+                    }
+                    ... on ProjectV2ItemFieldLabelValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        labels(first: 100) { nodes { name } }
+                    }
+                    ... on ProjectV2ItemFieldMilestoneValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        milestone { title }
+                    }
+                    ... on ProjectV2ItemFieldPullRequestValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        pullRequests(first: 100) { nodes { number repository { nameWithOwner } } }
+                    }
+                    ... on ProjectV2ItemFieldReviewerValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        reviewers(first: 100) { nodes {
+                            ... on Bot { displayName: login }
+                            ... on EnterpriseTeam { displayName: name }
+                            ... on Mannequin { displayName: login }
+                            ... on Team { displayName: name }
+                            ... on User { displayName: login }
+                        } }
+                    }
+                    ... on ProjectV2ItemFieldUserValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        users(first: 100) { nodes { login } }
+                    }
+                    ... on ProjectV2ItemIssueFieldValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        issueFieldValue {
+                            __typename
+                            ... on IssueFieldTextValue { value }
+                            ... on IssueFieldDateValue { value }
+                            ... on IssueFieldNumberValue { value }
+                            ... on IssueFieldSingleSelectValue { value }
+                            ... on IssueFieldMultiSelectValue { value }
+                        }
+                    }
         }
       }
       content {
@@ -417,10 +462,14 @@ struct DecodedPage {
 
 fn decode_project(body: &str) -> Result<DecodedPage, DynError> {
     let response: PageResponse = serde_json::from_str(body)?;
-    if !response.errors.is_empty() {
-        let messages = response
-            .errors
-            .iter()
+    let blocking_errors = response
+        .errors
+        .iter()
+        .filter(|error| !error.is_restricted_field_value())
+        .collect::<Vec<_>>();
+    if !blocking_errors.is_empty() {
+        let messages = blocking_errors
+            .into_iter()
             .map(|error| error.message.as_str())
             .collect::<Vec<_>>()
             .join("; ");
@@ -482,6 +531,32 @@ fn field_value(value: FieldValueData) -> Option<(String, String)> {
         FieldValueData::Iteration { field, title } => {
             display_field(field, title.unwrap_or_default())
         }
+        FieldValueData::MultiSelect { field, options } => display_field(
+            field,
+            join_values(options.into_iter().map(|option| option.name)),
+        ),
+        FieldValueData::Repository { field, repository } => {
+            display_field(field, repository.name_with_owner)
+        }
+        FieldValueData::Labels { field, labels } => display_field(field, labels.names()),
+        FieldValueData::Milestone { field, milestone } => display_field(field, milestone.title),
+        FieldValueData::PullRequests {
+            field,
+            pull_requests,
+        } => display_field(field, pull_requests.references()),
+        FieldValueData::Reviewers { field, reviewers } => {
+            display_field(field, reviewers.display_names())
+        }
+        FieldValueData::Users { field, users } => display_field(field, users.logins()),
+        FieldValueData::IssueField {
+            field,
+            issue_field_value,
+        } => display_field(
+            field,
+            issue_field_value
+                .map(IssueFieldValueData::display)
+                .unwrap_or_default(),
+        ),
         FieldValueData::Unsupported => None,
     }
 }
@@ -510,6 +585,16 @@ struct PageResponse {
 struct ApiError {
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    path: Vec<serde_json::Value>,
+}
+
+impl ApiError {
+    fn is_restricted_field_value(&self) -> bool {
+        self.message
+            .contains("has enabled OAuth App access restrictions")
+            && self.path.iter().any(|segment| segment == "fieldValues")
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -654,7 +739,7 @@ struct ItemData {
 #[derive(Default, Deserialize)]
 struct FieldValuesConnection {
     #[serde(default)]
-    nodes: Vec<FieldValueData>,
+    nodes: Vec<Option<FieldValueData>>,
 }
 
 #[derive(Deserialize)]
@@ -690,8 +775,195 @@ enum FieldValueData {
         #[serde(default)]
         title: Option<String>,
     },
+    #[serde(rename = "ProjectV2ItemFieldMultiSelectValue")]
+    MultiSelect {
+        field: FieldData,
+        #[serde(default)]
+        options: Vec<NamedData>,
+    },
+    #[serde(rename = "ProjectV2ItemFieldRepositoryValue")]
+    Repository {
+        field: FieldData,
+        repository: RepositoryData,
+    },
+    #[serde(rename = "ProjectV2ItemFieldLabelValue")]
+    Labels {
+        field: FieldData,
+        #[serde(default)]
+        labels: NamedConnection,
+    },
+    #[serde(rename = "ProjectV2ItemFieldMilestoneValue")]
+    Milestone {
+        field: FieldData,
+        milestone: MilestoneData,
+    },
+    #[serde(rename = "ProjectV2ItemFieldPullRequestValue")]
+    PullRequests {
+        field: FieldData,
+        #[serde(default, rename = "pullRequests")]
+        pull_requests: PullRequestConnection,
+    },
+    #[serde(rename = "ProjectV2ItemFieldReviewerValue")]
+    Reviewers {
+        field: FieldData,
+        #[serde(default)]
+        reviewers: ReviewerConnection,
+    },
+    #[serde(rename = "ProjectV2ItemFieldUserValue")]
+    Users {
+        field: FieldData,
+        #[serde(default)]
+        users: UserConnection,
+    },
+    #[serde(rename = "ProjectV2ItemIssueFieldValue")]
+    IssueField {
+        field: FieldData,
+        #[serde(default, rename = "issueFieldValue")]
+        issue_field_value: Option<IssueFieldValueData>,
+    },
     #[serde(other)]
     Unsupported,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryData {
+    #[serde(default)]
+    name_with_owner: String,
+}
+
+#[derive(Default, Deserialize)]
+struct NamedConnection {
+    #[serde(default)]
+    nodes: Vec<Option<NamedData>>,
+}
+
+impl NamedConnection {
+    fn names(self) -> String {
+        join_values(self.nodes.into_iter().flatten().map(|node| node.name))
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct NamedData {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Default, Deserialize)]
+struct MilestoneData {
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(Default, Deserialize)]
+struct PullRequestConnection {
+    #[serde(default)]
+    nodes: Vec<Option<PullRequestData>>,
+}
+
+impl PullRequestConnection {
+    fn references(self) -> String {
+        join_values(self.nodes.into_iter().flatten().map(|pull_request| {
+            format!(
+                "{}#{}",
+                pull_request.repository.name_with_owner, pull_request.number
+            )
+        }))
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct PullRequestData {
+    #[serde(default)]
+    number: u32,
+    #[serde(default)]
+    repository: RepositoryData,
+}
+
+#[derive(Default, Deserialize)]
+struct ReviewerConnection {
+    #[serde(default)]
+    nodes: Vec<Option<ReviewerData>>,
+}
+
+impl ReviewerConnection {
+    fn display_names(self) -> String {
+        join_values(
+            self.nodes
+                .into_iter()
+                .flatten()
+                .map(|reviewer| reviewer.display_name),
+        )
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewerData {
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(Default, Deserialize)]
+struct UserConnection {
+    #[serde(default)]
+    nodes: Vec<Option<UserData>>,
+}
+
+impl UserConnection {
+    fn logins(self) -> String {
+        join_values(self.nodes.into_iter().flatten().map(|user| user.login))
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct UserData {
+    #[serde(default)]
+    login: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "__typename")]
+enum IssueFieldValueData {
+    IssueFieldTextValue {
+        value: String,
+    },
+    IssueFieldDateValue {
+        value: String,
+    },
+    IssueFieldNumberValue {
+        value: f64,
+    },
+    IssueFieldSingleSelectValue {
+        value: String,
+    },
+    IssueFieldMultiSelectValue {
+        value: Option<String>,
+    },
+    #[serde(other)]
+    Unsupported,
+}
+
+impl IssueFieldValueData {
+    fn display(self) -> String {
+        match self {
+            Self::IssueFieldTextValue { value }
+            | Self::IssueFieldDateValue { value }
+            | Self::IssueFieldSingleSelectValue { value } => value,
+            Self::IssueFieldNumberValue { value } => format_number(value),
+            Self::IssueFieldMultiSelectValue { value } => value.unwrap_or_default(),
+            Self::Unsupported => String::new(),
+        }
+    }
+}
+
+fn join_values(values: impl IntoIterator<Item = String>) -> String {
+    values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Default, Deserialize)]
@@ -728,6 +1000,7 @@ impl From<ItemData> for Item {
             .field_values
             .nodes
             .into_iter()
+            .flatten()
             .filter_map(field_value)
             .collect();
         Self {
@@ -940,6 +1213,14 @@ mod tests {
                     ] },
                     { "__typename": "ProjectV2Field", "id": "estimate", "name": "Estimate", "dataType": "NUMBER" },
                     { "__typename": "ProjectV2Field", "id": "notes", "name": "Release notes", "dataType": "TEXT" },
+                    { "__typename": "ProjectV2Field", "id": "repository", "name": "Repository", "dataType": "REPOSITORY" },
+                    { "__typename": "ProjectV2Field", "id": "closed", "name": "Closed", "dataType": "CLOSED" },
+                    { "__typename": "ProjectV2Field", "id": "labels", "name": "Labels", "dataType": "LABELS" },
+                    { "__typename": "ProjectV2Field", "id": "assignees", "name": "Assignees", "dataType": "ASSIGNEES" },
+                    { "__typename": "ProjectV2Field", "id": "reviewers", "name": "Reviewers", "dataType": "REVIEWERS" },
+                    { "__typename": "ProjectV2Field", "id": "prs", "name": "Linked pull requests", "dataType": "LINKED_PULL_REQUESTS" },
+                    { "__typename": "ProjectV2Field", "id": "milestone", "name": "Milestone", "dataType": "MILESTONE" },
+                    { "__typename": "ProjectV2Field", "id": "components", "name": "Components", "dataType": "MULTI_SELECT" },
                     { "__typename": "ProjectV2IterationField", "id": "sprint", "name": "Sprint", "configuration": {
                         "iterations": [{ "id": "sprint-1", "title": "Sprint 1" }],
                         "completedIterations": [{ "id": "sprint-0", "title": "Sprint 0" }]
@@ -952,7 +1233,15 @@ mod tests {
                         "fieldValues": { "nodes": [
                             { "__typename": "ProjectV2ItemFieldTextValue", "field": { "name": "Title" }, "text": "Fix" },
                             { "__typename": "ProjectV2ItemFieldSingleSelectValue", "field": { "name": "Status" }, "name": "Done" },
-                            { "__typename": "ProjectV2ItemFieldNumberValue", "field": { "name": "Estimate" }, "number": 3.0 }
+                            { "__typename": "ProjectV2ItemFieldNumberValue", "field": { "name": "Estimate" }, "number": 3.0 },
+                            { "__typename": "ProjectV2ItemFieldRepositoryValue", "field": { "name": "Repository" }, "repository": { "nameWithOwner": "octo/repo" } },
+                            { "__typename": "ProjectV2ItemIssueFieldValue", "field": { "name": "Closed" }, "issueFieldValue": { "__typename": "IssueFieldSingleSelectValue", "value": "true" } },
+                            { "__typename": "ProjectV2ItemFieldLabelValue", "field": { "name": "Labels" }, "labels": { "nodes": [{ "name": "bug" }, null, { "name": "urgent" }] } },
+                            { "__typename": "ProjectV2ItemFieldUserValue", "field": { "name": "Assignees" }, "users": { "nodes": [{ "login": "octocat" }, null, { "login": "hubot" }] } },
+                            { "__typename": "ProjectV2ItemFieldReviewerValue", "field": { "name": "Reviewers" }, "reviewers": { "nodes": [{ "displayName": "reviewer" }, null, { "displayName": "core-team" }] } },
+                            { "__typename": "ProjectV2ItemFieldPullRequestValue", "field": { "name": "Linked pull requests" }, "pullRequests": { "nodes": [null, { "number": 7, "repository": { "nameWithOwner": "octo/repo" } }] } },
+                            { "__typename": "ProjectV2ItemFieldMilestoneValue", "field": { "name": "Milestone" }, "milestone": { "title": "v1.0" } },
+                            { "__typename": "ProjectV2ItemFieldMultiSelectValue", "field": { "name": "Components" }, "options": [{ "name": "API" }, { "name": "TUI" }] }
                         ] },
                         "content": { "__typename": "Issue", "number": 42, "title": "Fix", "url": "https://github.com/o/r/issues/42" }
                     }]
@@ -965,7 +1254,20 @@ mod tests {
         assert_eq!(page.title, "My Project");
         assert_eq!(
             page.field_names,
-            ["Status", "Estimate", "Release notes", "Sprint"]
+            [
+                "Status",
+                "Estimate",
+                "Release notes",
+                "Repository",
+                "Closed",
+                "Labels",
+                "Assignees",
+                "Reviewers",
+                "Linked pull requests",
+                "Milestone",
+                "Components",
+                "Sprint"
+            ]
         );
         assert_eq!(page.items[0].id, "item-id");
         assert_eq!(
@@ -979,9 +1281,83 @@ mod tests {
             page.items[0].fields,
             [
                 ("Status".into(), "Done".into()),
-                ("Estimate".into(), "3".into())
+                ("Estimate".into(), "3".into()),
+                ("Repository".into(), "octo/repo".into()),
+                ("Closed".into(), "true".into()),
+                ("Labels".into(), "bug, urgent".into()),
+                ("Assignees".into(), "octocat, hubot".into()),
+                ("Reviewers".into(), "reviewer, core-team".into()),
+                ("Linked pull requests".into(), "octo/repo#7".into()),
+                ("Milestone".into(), "v1.0".into()),
+                ("Components".into(), "API, TUI".into())
             ]
         );
+    }
+
+    #[test]
+    fn tolerates_oauth_restrictions_on_item_field_values() {
+        let response = serde_json::json!({
+            "data": { "user": { "project": {
+                "id": "project-id",
+                "title": "LLVM",
+                "fields": { "nodes": [] },
+                "items": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [{
+                        "id": "item-id",
+                        "fieldValues": { "nodes": [null] },
+                        "content": {
+                            "__typename": "Issue",
+                            "number": 1,
+                            "title": "Visible issue",
+                            "url": "https://github.com/llvm/llvm-project/issues/1"
+                        }
+                    }]
+                }
+            } } },
+            "errors": [{
+                "message": "Although you appear to have the correct authorization credentials, the `llvm` organization has enabled OAuth App access restrictions",
+                "path": ["user", "project", "items", "nodes", 0, "fieldValues", "nodes", 0, "reviewers"]
+            }]
+        });
+
+        let page = decode_project(&response.to_string()).unwrap();
+
+        assert_eq!(page.title, "LLVM");
+        assert_eq!(
+            page.items[0].content.as_ref().unwrap().title.as_deref(),
+            Some("Visible issue")
+        );
+        assert!(page.items[0].fields.is_empty());
+    }
+
+    #[test]
+    fn reports_project_level_and_unrelated_graphql_errors() {
+        let restricted_project = serde_json::json!({
+            "data": { "user": null },
+            "errors": [{
+                "message": "The `llvm` organization has enabled OAuth App access restrictions",
+                "path": ["user", "project"]
+            }]
+        });
+        let unrelated_field_error = serde_json::json!({
+            "data": { "user": null },
+            "errors": [{
+                "message": "Unexpected resolver failure",
+                "path": ["user", "project", "items", "nodes", 0, "fieldValues"]
+            }]
+        });
+
+        assert!(decode_project(&restricted_project.to_string())
+            .err()
+            .expect("project-level restriction should fail")
+            .to_string()
+            .contains("OAuth App access restrictions"));
+        assert!(decode_project(&unrelated_field_error.to_string())
+            .err()
+            .expect("unrelated GraphQL error should fail")
+            .to_string()
+            .contains("Unexpected resolver failure"));
     }
 
     #[test]

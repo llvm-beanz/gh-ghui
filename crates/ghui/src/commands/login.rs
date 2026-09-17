@@ -18,7 +18,7 @@ type DynError = Box<dyn Error>;
 const CLIENT_ID: &str = "Ov23li5S3LwmTDwXKubU";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const OAUTH_SCOPE: &str = "read:project";
+const OAUTH_SCOPE: &str = "read:project read:org";
 const KEYRING_SERVICE: &str = "ghui";
 const KEYRING_USER: &str = "github_token";
 
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_scope_is_read_only_for_projects() {
-        assert_eq!(OAUTH_SCOPE, "read:project");
+    fn oauth_scopes_allow_read_only_projects_and_team_reviewers() {
+        assert_eq!(OAUTH_SCOPE, "read:project read:org");
     }
 }

@@ -38,9 +38,16 @@ list.
 
 ## Permissions
 
-Login requests only the `read:project` OAuth scope. GitHub does not offer a
-read-only OAuth scope for private repositories; requesting private repository
-access would require the much broader `repo` scope, so it is intentionally not
-requested. Credentials are stored in the system keyring and cannot be supplied
-on the command line.
+Login requests the read-only `read:project` and `read:org` OAuth scopes.
+Project access requires `read:project`; displaying organization and enterprise
+team reviewers requires `read:org`. GitHub does not offer a read-only OAuth
+scope for private repositories; requesting private repository access would
+require the much broader `repo` scope, so it is intentionally not requested.
+Credentials are stored in the system keyring and cannot be supplied on the
+command line.
+
+Organizations can restrict third-party OAuth App access independently of token
+scopes. When GitHub returns accessible project items with restricted field
+values, ghui displays the items and leaves those fields blank. A restriction
+that prevents access to the project itself is still reported as an error.
 
