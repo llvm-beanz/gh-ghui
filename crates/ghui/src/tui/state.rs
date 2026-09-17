@@ -5,36 +5,64 @@ use serde::{Deserialize, Serialize};
 
 use crate::github::DynError;
 
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewState {
-    version: u32,
     pub project_url: Option<String>,
     pub selected: Option<usize>,
     #[serde(default)]
     pub columns: Option<Vec<String>>,
 }
 
-impl Default for ViewState {
-    fn default() -> Self {
+#[allow(dead_code)]
+impl ViewState {
+    pub fn new(project_url: Option<String>, selected: Option<usize>) -> Self {
         Self {
-            version: CURRENT_VERSION,
-            project_url: None,
-            selected: None,
+            project_url,
+            selected,
             columns: None,
         }
     }
 }
 
-#[allow(dead_code)]
-impl ViewState {
-    pub fn new(project_url: Option<String>, selected: Option<usize>) -> Self {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionState {
+    version: u32,
+    pub tabs: Vec<ViewState>,
+    pub active_tab: usize,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
         Self {
             version: CURRENT_VERSION,
-            project_url,
-            selected,
-            columns: None,
+            tabs: vec![ViewState::default()],
+            active_tab: 0,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LegacyViewState {
+    project_url: Option<String>,
+    selected: Option<usize>,
+    #[serde(default)]
+    columns: Option<Vec<String>>,
+}
+
+#[allow(dead_code)]
+impl SessionState {
+    pub fn new(tabs: Vec<ViewState>, active_tab: usize) -> Self {
+        let tabs = if tabs.is_empty() {
+            vec![ViewState::default()]
+        } else {
+            tabs
+        };
+        Self {
+            version: CURRENT_VERSION,
+            active_tab: active_tab.min(tabs.len() - 1),
+            tabs,
         }
     }
 
@@ -43,15 +71,34 @@ impl ViewState {
     }
 
     pub fn from_text(text: &str) -> Result<Self, DynError> {
-        let state: Self = serde_json::from_str(text)?;
-        if state.version != CURRENT_VERSION {
-            return Err(format!(
-                "unsupported view state version {} (expected {CURRENT_VERSION})",
-                state.version
+        let value: serde_json::Value = serde_json::from_str(text)?;
+        match value.get("version").and_then(serde_json::Value::as_u64) {
+            Some(1) => {
+                let legacy: LegacyViewState = serde_json::from_value(value)?;
+                Ok(Self {
+                    version: CURRENT_VERSION,
+                    tabs: vec![ViewState {
+                        project_url: legacy.project_url,
+                        selected: legacy.selected,
+                        columns: legacy.columns,
+                    }],
+                    active_tab: 0,
+                })
+            }
+            Some(version) if version == u64::from(CURRENT_VERSION) => {
+                let mut state: Self = serde_json::from_value(value)?;
+                if state.tabs.is_empty() {
+                    state.tabs.push(ViewState::default());
+                }
+                state.active_tab = state.active_tab.min(state.tabs.len() - 1);
+                Ok(state)
+            }
+            Some(version) => Err(format!(
+                "unsupported session state version {version} (expected {CURRENT_VERSION})"
             )
-            .into());
+            .into()),
+            None => Err("session state is missing its version".into()),
         }
-        Ok(state)
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), DynError> {
@@ -70,33 +117,36 @@ mod tests {
 
     use super::*;
 
-    fn sample_state() -> ViewState {
-        ViewState::new(
-            Some("https://github.com/orgs/example/projects/1".into()),
-            Some(12),
+    fn sample_state() -> SessionState {
+        SessionState::new(
+            vec![ViewState::new(
+                Some("https://github.com/orgs/example/projects/1".into()),
+                Some(12),
+            )],
+            0,
         )
     }
 
     #[test]
     fn state_round_trips_as_readable_text() {
         let mut state = sample_state();
-        state.columns = Some(vec!["Title".into(), "Status".into()]);
+        state.tabs[0].columns = Some(vec!["Title".into(), "Status".into()]);
 
         let text = state.to_text().unwrap();
 
         assert!(text.contains("\"project_url\""));
         assert!(text.contains("https://github.com/orgs/example/projects/1"));
         assert!(text.contains("\"columns\""));
-        assert_eq!(ViewState::from_text(&text).unwrap(), state);
+        assert_eq!(SessionState::from_text(&text).unwrap(), state);
     }
 
     #[test]
     fn state_without_columns_enables_all_columns() {
         let state =
-            ViewState::from_text(r#"{ "version": 1, "project_url": null, "selected": null }"#)
+            SessionState::from_text(r#"{ "version": 1, "project_url": null, "selected": null }"#)
                 .unwrap();
 
-        assert_eq!(state.columns, None);
+        assert_eq!(state.tabs[0].columns, None);
     }
 
     #[test]
@@ -109,7 +159,7 @@ mod tests {
         let state = sample_state();
 
         state.save(&path).unwrap();
-        let loaded = ViewState::load(&path).unwrap();
+        let loaded = SessionState::load(&path).unwrap();
         fs::remove_file(path).unwrap();
 
         assert_eq!(loaded, state);
@@ -118,11 +168,27 @@ mod tests {
     #[test]
     fn rejects_unknown_state_versions() {
         let error =
-            ViewState::from_text(r#"{ "version": 99, "project_url": null, "selected": null }"#)
+            SessionState::from_text(r#"{ "version": 99, "project_url": null, "selected": null }"#)
                 .unwrap_err();
 
         assert!(error
             .to_string()
-            .contains("unsupported view state version 99"));
+            .contains("unsupported session state version 99"));
+    }
+
+    #[test]
+    fn state_round_trips_multiple_tabs_and_active_tab() {
+        let state = SessionState::new(
+            vec![
+                ViewState::new(Some("https://github.com/orgs/a/projects/1".into()), Some(2)),
+                ViewState::new(Some("https://github.com/orgs/b/projects/2".into()), Some(5)),
+            ],
+            1,
+        );
+
+        assert_eq!(
+            SessionState::from_text(&state.to_text().unwrap()).unwrap(),
+            state
+        );
     }
 }

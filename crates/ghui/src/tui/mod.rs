@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
 use ratatui::{Frame, Terminal};
 
 use crate::commands::login;
@@ -23,22 +23,45 @@ use crate::github::{
     parse_project_url, DynError, EditableField, EditableFieldKind, FieldValue, GitHubProjectSource,
     Item, Kind, Project, ProjectSource,
 };
-use state::ViewState;
+use state::{SessionState, ViewState};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RuntimeTab {
+    project: Option<Project>,
+    view: ViewState,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct App {
     mode: Mode,
     command: String,
-    project: Option<Project>,
-    view_state: ViewState,
+    tabs: Vec<RuntimeTab>,
+    active_tab: usize,
     state_path: Option<PathBuf>,
     column_selected: usize,
     active_column: Option<String>,
     field_editor: Option<FieldEditor>,
     message: Option<String>,
     should_quit: bool,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            command: String::new(),
+            tabs: vec![RuntimeTab::default()],
+            active_tab: 0,
+            state_path: None,
+            column_selected: 0,
+            active_column: None,
+            field_editor: None,
+            message: None,
+            should_quit: false,
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -79,6 +102,10 @@ enum Action {
     Write,
     WriteQuit,
     UpdateField(FieldUpdate),
+    NewTab(Option<String>),
+    CloseTab,
+    NextTab,
+    PreviousTab,
 }
 
 impl App {
@@ -89,6 +116,15 @@ impl App {
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return None;
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Tab {
+            self.next_tab();
+            return None;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::BackTab {
+            self.previous_tab();
             return None;
         }
 
@@ -232,13 +268,31 @@ impl App {
         }
 
         if command == "columns" {
-            if self.project.is_some() {
+            if self.project().is_some() {
                 self.column_selected = 0;
                 self.mode = Mode::Columns;
             } else {
                 self.message = Some("No project open".into());
             }
             return None;
+        }
+
+        if command == "tabnew" {
+            return Some(Action::NewTab(None));
+        }
+        if let Some(target) = command.strip_prefix("tabnew ").map(str::trim) {
+            if !target.is_empty() {
+                return Some(Action::NewTab(Some(target.to_string())));
+            }
+        }
+        if command == "tabnext" || command == "tabn" {
+            return Some(Action::NextTab);
+        }
+        if command == "tabprevious" || command == "tabp" {
+            return Some(Action::PreviousTab);
+        }
+        if command == "tabclose" || command == "tabc" {
+            return Some(Action::CloseTab);
         }
 
         if let Some(target) = command.strip_prefix("e ").map(str::trim) {
@@ -253,30 +307,28 @@ impl App {
 
     fn move_selection(&mut self, amount: isize) {
         let Some(last_index) = self.last_item_index() else {
-            self.view_state.selected = None;
+            self.view_mut().selected = None;
             return;
         };
-        let selected = self.view_state.selected.unwrap_or_default();
-        self.view_state.selected = Some(selected.saturating_add_signed(amount).min(last_index));
+        let selected = self.view().selected.unwrap_or_default();
+        self.view_mut().selected = Some(selected.saturating_add_signed(amount).min(last_index));
     }
 
     fn select_first(&mut self) {
-        self.view_state.selected = self.last_item_index().map(|_| 0);
+        self.view_mut().selected = self.last_item_index().map(|_| 0);
     }
 
     fn select_last(&mut self) {
-        self.view_state.selected = self.last_item_index();
+        self.view_mut().selected = self.last_item_index();
     }
 
     fn last_item_index(&self) -> Option<usize> {
-        self.project
-            .as_ref()
+        self.project()
             .and_then(|project| project.items.len().checked_sub(1))
     }
 
     fn available_columns(&self) -> Vec<String> {
-        self.project
-            .as_ref()
+        self.project()
             .map(project_columns)
             .unwrap_or_default()
             .into_iter()
@@ -290,7 +342,7 @@ impl App {
             return;
         };
         let enabled = self
-            .view_state
+            .view_mut()
             .columns
             .get_or_insert_with(|| available.clone());
         if enabled.contains(column) {
@@ -307,9 +359,8 @@ impl App {
     }
 
     fn mutable_columns(&self) -> Vec<String> {
-        let enabled = self.view_state.columns.as_deref();
-        self.project
-            .as_ref()
+        let enabled = self.view().columns.as_deref();
+        self.project()
             .map(project_columns)
             .unwrap_or_default()
             .into_iter()
@@ -321,7 +372,7 @@ impl App {
     }
 
     fn activate_selected_row(&mut self) {
-        if self.view_state.selected.is_none() {
+        if self.view().selected.is_none() {
             return;
         }
         let mut columns = self.mutable_columns().into_iter();
@@ -348,7 +399,9 @@ impl App {
     }
 
     fn open_field_editor(&mut self) {
-        let Some(project) = &self.project else { return };
+        let Some(project) = self.project() else {
+            return;
+        };
         let Some(field_name) = &self.active_column else {
             return;
         };
@@ -362,7 +415,7 @@ impl App {
             return;
         };
         let current = self
-            .view_state
+            .view()
             .selected
             .and_then(|index| project.items.get(index))
             .and_then(|item| item.fields.iter().find(|(name, _)| name == field_name))
@@ -389,8 +442,8 @@ impl App {
     }
 
     fn field_update_action(&mut self) -> Option<Action> {
-        let project = self.project.as_ref()?;
-        let item = project.items.get(self.view_state.selected?)?;
+        let project = self.project()?;
+        let item = project.items.get(self.view().selected?)?;
         let (field, value, display_value) = match self.field_editor.as_ref()? {
             FieldEditor::Input { field, value } => {
                 let parsed = match field.kind {
@@ -431,6 +484,75 @@ impl App {
             value,
             display_value,
         }))
+    }
+
+    fn tab(&self) -> &RuntimeTab {
+        &self.tabs[self.active_tab]
+    }
+
+    fn tab_mut(&mut self) -> &mut RuntimeTab {
+        &mut self.tabs[self.active_tab]
+    }
+
+    fn project(&self) -> Option<&Project> {
+        self.tab().project.as_ref()
+    }
+
+    fn project_mut(&mut self) -> Option<&mut Project> {
+        self.tab_mut().project.as_mut()
+    }
+
+    fn view(&self) -> &ViewState {
+        &self.tab().view
+    }
+
+    fn view_mut(&mut self) -> &mut ViewState {
+        &mut self.tab_mut().view
+    }
+
+    fn next_tab(&mut self) {
+        self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        self.leave_transient_mode();
+    }
+
+    fn new_tab(&mut self, duplicate_current: bool) {
+        let tab = if duplicate_current {
+            self.tab().clone()
+        } else {
+            RuntimeTab::default()
+        };
+        self.tabs.insert(self.active_tab + 1, tab);
+        self.active_tab += 1;
+        self.leave_transient_mode();
+    }
+
+    fn previous_tab(&mut self) {
+        self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+        self.leave_transient_mode();
+    }
+
+    fn close_tab(&mut self) {
+        if self.tabs.len() == 1 {
+            self.tabs[0] = RuntimeTab::default();
+            self.active_tab = 0;
+        } else {
+            self.tabs.remove(self.active_tab);
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        }
+        self.leave_transient_mode();
+    }
+
+    fn leave_transient_mode(&mut self) {
+        self.mode = Mode::Normal;
+        self.active_column = None;
+        self.field_editor = None;
+    }
+
+    fn session_state(&self) -> SessionState {
+        SessionState::new(
+            self.tabs.iter().map(|tab| tab.view.clone()).collect(),
+            self.active_tab,
+        )
     }
 }
 
@@ -547,6 +669,21 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
                 Some(Action::UpdateField(update)) => {
                     update_field(&mut app, update, &token_provider, &source);
                 }
+                Some(Action::NewTab(target)) => {
+                    app.new_tab(target.is_none());
+                    if let Some(target) = target {
+                        edit_target_with_progress(
+                            &mut session.terminal,
+                            &mut app,
+                            &target,
+                            &token_provider,
+                            &source,
+                        )?;
+                    }
+                }
+                Some(Action::CloseTab) => app.close_tab(),
+                Some(Action::NextTab) => app.next_tab(),
+                Some(Action::PreviousTab) => app.previous_tab(),
                 None => {}
             }
         }
@@ -581,10 +718,10 @@ fn edit_target(
 
     let path = Path::new(target);
     if path.exists() {
-        match ViewState::load(path) {
+        match SessionState::load(path) {
             Ok(state) => {
                 app.state_path = Some(path.to_path_buf());
-                restore_view_state(app, state, token_provider, source);
+                restore_session_state(app, state, token_provider, source);
             }
             Err(error) => app.message = Some(error.to_string()),
         }
@@ -600,7 +737,7 @@ fn write_state(app: &mut App) -> bool {
         return false;
     };
 
-    match app.view_state.save(path) {
+    match app.session_state().save(path) {
         Ok(()) => {
             app.message = Some(format!("Saved {}", path.display()));
             true
@@ -636,7 +773,7 @@ fn update_field(
         &token,
     ) {
         Ok(()) => {
-            if let Some(item) = app.project.as_mut().and_then(|project| {
+            if let Some(item) = app.project_mut().and_then(|project| {
                 project
                     .items
                     .iter_mut()
@@ -676,49 +813,86 @@ fn open_project(
 
     match result {
         Ok(project) => {
-            app.view_state.project_url = Some(url.to_string());
-            app.view_state.selected = (!project.items.is_empty()).then_some(0);
-            app.project = Some(project);
+            app.view_mut().project_url = Some(url.to_string());
+            app.view_mut().selected = (!project.items.is_empty()).then_some(0);
+            app.tab_mut().project = Some(project);
             app.message = None;
         }
         Err(error) => app.message = Some(error.to_string()),
     }
 }
 
-fn restore_view_state(
+fn restore_session_state(
     app: &mut App,
-    state: ViewState,
+    state: SessionState,
     token_provider: &dyn TokenProvider,
     source: &dyn ProjectSource,
 ) {
-    let Some(url) = state.project_url.clone() else {
-        app.view_state = state;
-        app.project = None;
-        return;
-    };
-    let saved_selection = state.selected;
-    app.view_state = state;
-    app.project = None;
-    open_project(app, &url, token_provider, source);
-    if app.message.is_none() {
-        app.view_state.selected = match (saved_selection, app.last_item_index()) {
-            (Some(selected), Some(last_index)) => Some(selected.min(last_index)),
-            _ => None,
+    let active_tab = state.active_tab;
+    app.tabs = state
+        .tabs
+        .into_iter()
+        .map(|view| RuntimeTab {
+            project: None,
+            view,
+        })
+        .collect();
+    app.active_tab = active_tab.min(app.tabs.len() - 1);
+    for index in 0..app.tabs.len() {
+        app.active_tab = index;
+        let Some(url) = app.view().project_url.clone() else {
+            continue;
         };
+        let saved_selection = app.view().selected;
+        open_project(app, &url, token_provider, source);
+        if app.message.is_none() {
+            app.view_mut().selected = match (saved_selection, app.last_item_index()) {
+                (Some(selected), Some(last_index)) => Some(selected.min(last_index)),
+                _ => None,
+            };
+        }
     }
+    app.active_tab = active_tab.min(app.tabs.len() - 1);
+    app.leave_transient_mode();
 }
 
 fn render(frame: &mut Frame, app: &App) {
-    let [content_area, status_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+    let [tabs_area, content_area, status_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
 
-    match &app.project {
+    let titles = app.tabs.iter().enumerate().map(|(index, tab)| {
+        let title = tab
+            .project
+            .as_ref()
+            .map(|project| project.title.as_str())
+            .or(tab.view.project_url.as_deref())
+            .unwrap_or("New");
+        Line::from(format!(" {}:{} ", index + 1, title))
+    });
+    frame.render_widget(
+        Tabs::new(titles)
+            .select(app.active_tab)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .divider(""),
+        tabs_area,
+    );
+
+    match app.project() {
         Some(project) => render_project(
             frame,
             content_area,
             project,
-            app.view_state.selected,
-            app.view_state.columns.as_deref(),
+            app.view().selected,
+            app.view().columns.as_deref(),
             (app.mode == Mode::Active)
                 .then_some(app.active_column.as_deref())
                 .flatten(),
@@ -803,7 +977,7 @@ fn render_columns(frame: &mut Frame, app: &App) {
     let available = app.available_columns();
     let items = available.iter().map(|column| {
         let enabled = app
-            .view_state
+            .view()
             .columns
             .as_ref()
             .is_none_or(|columns| columns.contains(column));
@@ -1125,6 +1299,16 @@ mod tests {
         std::env::temp_dir().join(format!("{prefix}-{}-{unique}.json", std::process::id()))
     }
 
+    fn app_with_project(project: Project, view: ViewState) -> App {
+        App {
+            tabs: vec![RuntimeTab {
+                project: Some(project),
+                view,
+            }],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn q_command_quits() {
         let mut app = App::default();
@@ -1150,6 +1334,65 @@ mod tests {
     }
 
     #[test]
+    fn tab_commands_return_navigation_actions() {
+        let mut app = App::default();
+
+        assert_eq!(type_command(&mut app, "tabnew"), Some(Action::NewTab(None)));
+        assert_eq!(
+            type_command(
+                &mut app,
+                "tabnew https://github.com/orgs/example/projects/2"
+            ),
+            Some(Action::NewTab(Some(
+                "https://github.com/orgs/example/projects/2".into()
+            )))
+        );
+        assert_eq!(type_command(&mut app, "tabnext"), Some(Action::NextTab));
+        assert_eq!(
+            type_command(&mut app, "tabprevious"),
+            Some(Action::PreviousTab)
+        );
+        assert_eq!(type_command(&mut app, "tabclose"), Some(Action::CloseTab));
+    }
+
+    #[test]
+    fn duplicate_tabs_have_independent_view_state() {
+        let mut app = app_with_project(
+            sample_project(3),
+            ViewState::new(
+                Some("https://github.com/orgs/example/projects/1".into()),
+                Some(0),
+            ),
+        );
+
+        app.new_tab(true);
+        app.move_selection(1);
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[0].view.selected, Some(0));
+        assert_eq!(app.tabs[1].view.selected, Some(1));
+        assert_eq!(app.tabs[0].view.project_url, app.tabs[1].view.project_url);
+        app.previous_tab();
+        assert_eq!(app.active_tab, 0);
+        app.previous_tab();
+        assert_eq!(app.active_tab, 1);
+    }
+
+    #[test]
+    fn close_tab_keeps_at_least_one_tab() {
+        let mut app = App::default();
+        app.new_tab(false);
+
+        app.close_tab();
+        assert_eq!(app.tabs.len(), 1);
+        app.close_tab();
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.tabs[0], RuntimeTab::default());
+    }
+
+    #[test]
     fn opens_project_with_injected_dependencies() {
         let source = MockProjectSource::returning(sample_project(3));
         let mut app = App::default();
@@ -1161,11 +1404,11 @@ mod tests {
             &source,
         );
 
-        assert_eq!(app.project.as_ref().unwrap().items.len(), 3);
+        assert_eq!(app.project().unwrap().items.len(), 3);
         assert_eq!(source.requests()[0].1, "token");
-        assert_eq!(app.view_state.selected, Some(0));
+        assert_eq!(app.view().selected, Some(0));
         assert_eq!(
-            app.view_state.project_url.as_deref(),
+            app.view().project_url.as_deref(),
             Some("https://github.com/orgs/example/projects/1")
         );
         assert_eq!(app.message, None);
@@ -1173,10 +1416,7 @@ mod tests {
 
     #[test]
     fn failed_open_keeps_existing_project_and_shows_error() {
-        let mut app = App {
-            project: Some(sample_project(1)),
-            ..Default::default()
-        };
+        let mut app = app_with_project(sample_project(1), ViewState::default());
 
         open_project(
             &mut app,
@@ -1185,31 +1425,27 @@ mod tests {
             &MockProjectSource::failing("request failed"),
         );
 
-        assert_eq!(app.project.as_ref().unwrap().items.len(), 1);
+        assert_eq!(app.project().unwrap().items.len(), 1);
         assert_eq!(app.message.as_deref(), Some("request failed"));
     }
 
     #[test]
     fn normal_mode_moves_selection() {
-        let mut app = App {
-            project: Some(sample_project(20)),
-            view_state: ViewState::new(None, Some(0)),
-            ..Default::default()
-        };
+        let mut app = app_with_project(sample_project(20), ViewState::new(None, Some(0)));
 
         app.handle_key(key(KeyCode::Char('j')));
         app.handle_key(key(KeyCode::PageDown));
-        assert_eq!(app.view_state.selected, Some(11));
+        assert_eq!(app.view().selected, Some(11));
 
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.view_state.selected, Some(10));
+        assert_eq!(app.view().selected, Some(10));
 
         app.handle_key(key(KeyCode::Char('g')));
-        assert_eq!(app.view_state.selected, Some(0));
+        assert_eq!(app.view().selected, Some(0));
 
         app.handle_key(key(KeyCode::Char('G')));
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.view_state.selected, Some(19));
+        assert_eq!(app.view().selected, Some(19));
     }
 
     #[test]
@@ -1252,11 +1488,7 @@ mod tests {
         let mut project = sample_project(3);
         project.field_names.push("Priority".into());
         project.mutable_field_names.push("Priority".into());
-        let mut app = App {
-            project: Some(project),
-            view_state: ViewState::new(None, Some(0)),
-            ..Default::default()
-        };
+        let mut app = app_with_project(project, ViewState::new(None, Some(0)));
 
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.mode, Mode::Active);
@@ -1270,18 +1502,20 @@ mod tests {
         assert_eq!(app.active_column.as_deref(), Some("Priority"));
 
         app.handle_key(key(KeyCode::Down));
-        assert_eq!(app.view_state.selected, Some(1));
+        assert_eq!(app.view().selected, Some(1));
         assert_eq!(app.mode, Mode::Active);
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(app.view_state.selected, Some(0));
+        assert_eq!(app.view().selected, Some(0));
     }
 
     #[test]
     fn enter_on_active_selection_opens_and_updates_select_field() {
         let source = MockProjectSource::returning(sample_project(1));
         let mut app = App {
-            project: Some(sample_project(1)),
-            view_state: ViewState::new(None, Some(0)),
+            tabs: vec![RuntimeTab {
+                project: Some(sample_project(1)),
+                view: ViewState::new(None, Some(0)),
+            }],
             mode: Mode::Active,
             active_column: Some("Status".into()),
             ..Default::default()
@@ -1300,7 +1534,7 @@ mod tests {
             source.updates()[0].value,
             FieldValue::SingleSelect("done-option".into())
         );
-        assert_eq!(app.project.as_ref().unwrap().items[0].fields[0].1, "Done");
+        assert_eq!(app.project().unwrap().items[0].fields[0].1, "Done");
         assert_eq!(app.mode, Mode::Active);
     }
 
@@ -1321,8 +1555,10 @@ mod tests {
                 options: vec![],
             });
             let mut app = App {
-                project: Some(project),
-                view_state: ViewState::new(None, Some(0)),
+                tabs: vec![RuntimeTab {
+                    project: Some(project),
+                    view: ViewState::new(None, Some(0)),
+                }],
                 mode: Mode::Active,
                 active_column: Some(name.into()),
                 ..Default::default()
@@ -1359,8 +1595,10 @@ mod tests {
             .fields
             .push(("Notes".into(), "hello".into()));
         let mut app = App {
-            project: Some(project),
-            view_state: ViewState::new(None, Some(0)),
+            tabs: vec![RuntimeTab {
+                project: Some(project),
+                view: ViewState::new(None, Some(0)),
+            }],
             mode: Mode::Active,
             active_column: Some("Notes".into()),
             ..Default::default()
@@ -1382,8 +1620,10 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let project = sample_project(1);
         let mut app = App {
-            project: Some(project),
-            view_state: ViewState::new(None, Some(0)),
+            tabs: vec![RuntimeTab {
+                project: Some(project),
+                view: ViewState::new(None, Some(0)),
+            }],
             mode: Mode::Active,
             active_column: Some("Status".into()),
             ..Default::default()
@@ -1411,8 +1651,10 @@ mod tests {
         let app = App {
             mode: Mode::Active,
             active_column: Some("Status".into()),
-            project: Some(sample_project(2)),
-            view_state: ViewState::new(None, Some(0)),
+            tabs: vec![RuntimeTab {
+                project: Some(sample_project(2)),
+                view: ViewState::new(None, Some(0)),
+            }],
             ..Default::default()
         };
 
@@ -1436,10 +1678,7 @@ mod tests {
     fn columns_command_opens_checkbox_menu_and_toggles_columns() {
         let mut project = sample_project(2);
         project.field_names.push("Release notes".into());
-        let mut app = App {
-            project: Some(project),
-            ..Default::default()
-        };
+        let mut app = app_with_project(project, ViewState::default());
 
         assert_eq!(type_command(&mut app, "columns"), None);
         assert_eq!(app.mode, Mode::Columns);
@@ -1455,7 +1694,7 @@ mod tests {
 
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(
-            app.view_state.columns,
+            app.view().columns,
             Some(vec![
                 "Title".into(),
                 "Status".into(),
@@ -1470,12 +1709,13 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let app = App {
             mode: Mode::Columns,
-            project: Some(sample_project(2)),
-            view_state: {
-                let mut state = ViewState::default();
-                state.columns = Some(vec!["Title".into()]);
-                state
-            },
+            tabs: vec![RuntimeTab {
+                project: Some(sample_project(2)),
+                view: ViewState {
+                    columns: Some(vec!["Title".into()]),
+                    ..Default::default()
+                },
+            }],
             ..Default::default()
         };
 
@@ -1513,7 +1753,10 @@ mod tests {
         let app = App {
             mode: Mode::Command,
             command: "q".into(),
-            project: Some(sample_project(2)),
+            tabs: vec![RuntimeTab {
+                project: Some(sample_project(2)),
+                view: ViewState::default(),
+            }],
             ..Default::default()
         };
 
@@ -1533,14 +1776,44 @@ mod tests {
     }
 
     #[test]
+    fn renders_all_open_tabs_and_highlights_active_tab() {
+        let backend = TestBackend::new(70, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut second_project = sample_project(1);
+        second_project.title = "Second".into();
+        let app = App {
+            tabs: vec![
+                RuntimeTab {
+                    project: Some(sample_project(1)),
+                    view: ViewState::default(),
+                },
+                RuntimeTab {
+                    project: Some(second_project),
+                    view: ViewState::default(),
+                },
+            ],
+            active_tab: 1,
+            ..Default::default()
+        };
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let first_row = &terminal.backend().buffer().content()
+            [..terminal.backend().buffer().area.width as usize];
+        let text = first_row
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("1:Demo"));
+        assert!(text.contains("2:Second"));
+        assert!(first_row.iter().any(|cell| cell.bg == Color::Cyan));
+    }
+
+    #[test]
     fn scrolling_keeps_column_header_visible() {
         let backend = TestBackend::new(50, 8);
         let mut terminal = Terminal::new(backend).unwrap();
-        let app = App {
-            project: Some(sample_project(10)),
-            view_state: ViewState::new(None, Some(5)),
-            ..Default::default()
-        };
+        let app = app_with_project(sample_project(10), ViewState::new(None, Some(5)));
 
         terminal.draw(|frame| render(frame, &app)).unwrap();
 
@@ -1573,26 +1846,60 @@ mod tests {
     #[test]
     fn restores_project_and_clamps_saved_selection() {
         let source = MockProjectSource::returning(sample_project(3));
-        let state = ViewState::new(
-            Some("https://github.com/orgs/example/projects/1".into()),
-            Some(20),
+        let state = SessionState::new(
+            vec![ViewState::new(
+                Some("https://github.com/orgs/example/projects/1".into()),
+                Some(20),
+            )],
+            0,
         );
-        let state = ViewState::from_text(&state.to_text().unwrap()).unwrap();
+        let state = SessionState::from_text(&state.to_text().unwrap()).unwrap();
         let mut app = App::default();
 
-        restore_view_state(&mut app, state, &FixedToken(Some("token".into())), &source);
+        restore_session_state(&mut app, state, &FixedToken(Some("token".into())), &source);
 
-        assert_eq!(app.project.as_ref().unwrap().items.len(), 3);
-        assert_eq!(app.view_state.selected, Some(2));
+        assert_eq!(app.project().unwrap().items.len(), 3);
+        assert_eq!(app.view().selected, Some(2));
         assert_eq!(source.requests().len(), 1);
+    }
+
+    #[test]
+    fn restores_all_saved_tabs_and_active_tab() {
+        let source = MockProjectSource::returning(sample_project(4));
+        let state = SessionState::new(
+            vec![
+                ViewState::new(
+                    Some("https://github.com/orgs/example/projects/1".into()),
+                    Some(1),
+                ),
+                ViewState::new(
+                    Some("https://github.com/orgs/example/projects/2".into()),
+                    Some(3),
+                ),
+            ],
+            1,
+        );
+        let mut app = App::default();
+
+        restore_session_state(&mut app, state, &FixedToken(Some("token".into())), &source);
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.tabs[0].view.selected, Some(1));
+        assert_eq!(app.tabs[1].view.selected, Some(3));
+        assert!(app.tabs.iter().all(|tab| tab.project.is_some()));
+        assert_eq!(source.requests().len(), 2);
     }
 
     #[test]
     fn edit_existing_path_loads_and_restores_state() {
         let path = temp_state_path("ghui-load-state");
-        ViewState::new(
-            Some("https://github.com/orgs/example/projects/1".into()),
-            Some(1),
+        SessionState::new(
+            vec![ViewState::new(
+                Some("https://github.com/orgs/example/projects/1".into()),
+                Some(1),
+            )],
+            0,
         )
         .save(&path)
         .unwrap();
@@ -1608,21 +1915,19 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert_eq!(app.state_path.as_deref(), Some(path.as_path()));
-        assert_eq!(app.view_state.selected, Some(1));
-        assert_eq!(app.project.as_ref().unwrap().items.len(), 3);
+        assert_eq!(app.view().selected, Some(1));
+        assert_eq!(app.project().unwrap().items.len(), 3);
     }
 
     #[test]
     fn edit_missing_path_sets_destination_and_write_saves_state() {
         let path = temp_state_path("ghui-save-state");
         let _ = std::fs::remove_file(&path);
-        let mut app = App {
-            view_state: ViewState::new(
-                Some("https://github.com/orgs/example/projects/1".into()),
-                Some(2),
-            ),
-            ..Default::default()
-        };
+        let mut app = App::default();
+        app.tabs[0].view = ViewState::new(
+            Some("https://github.com/orgs/example/projects/1".into()),
+            Some(2),
+        );
 
         edit_target(
             &mut app,
@@ -1632,7 +1937,7 @@ mod tests {
         );
         write_state(&mut app);
 
-        assert_eq!(ViewState::load(&path).unwrap(), app.view_state);
+        assert_eq!(SessionState::load(&path).unwrap(), app.session_state());
         assert!(app.message.as_deref().unwrap().starts_with("Saved "));
         std::fs::remove_file(path).unwrap();
     }
@@ -1655,18 +1960,18 @@ mod tests {
         let path = temp_state_path("ghui-write-quit-state");
         let mut app = App {
             state_path: Some(path.clone()),
-            view_state: ViewState::new(
-                Some("https://github.com/orgs/example/projects/1".into()),
-                Some(2),
-            ),
             ..Default::default()
         };
+        app.tabs[0].view = ViewState::new(
+            Some("https://github.com/orgs/example/projects/1".into()),
+            Some(2),
+        );
 
         assert_eq!(type_command(&mut app, "wq"), Some(Action::WriteQuit));
         write_and_maybe_quit(&mut app, true);
 
         assert!(app.should_quit);
-        assert_eq!(ViewState::load(&path).unwrap(), app.view_state);
+        assert_eq!(SessionState::load(&path).unwrap(), app.session_state());
         std::fs::remove_file(path).unwrap();
     }
 
