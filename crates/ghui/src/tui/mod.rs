@@ -1,7 +1,10 @@
 //! Interactive terminal UI, built on ratatui.
 
+pub mod state;
+
 use std::collections::HashMap;
 use std::io::{self, Stdout};
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -19,6 +22,7 @@ use crate::commands::login;
 use crate::github::{
     parse_project_url, DynError, GitHubProjectSource, Item, Kind, Project, ProjectSource,
 };
+use state::ViewState;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -27,7 +31,8 @@ struct App {
     mode: Mode,
     command: String,
     project: Option<Project>,
-    selected: Option<usize>,
+    view_state: ViewState,
+    state_path: Option<PathBuf>,
     message: Option<String>,
     should_quit: bool,
 }
@@ -41,7 +46,9 @@ enum Mode {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
-    Open(String),
+    Edit(String),
+    Write,
+    WriteQuit,
 }
 
 impl App {
@@ -109,9 +116,17 @@ impl App {
             return None;
         }
 
-        if let Some(url) = command.strip_prefix("e ").map(str::trim) {
-            if !url.is_empty() {
-                return Some(Action::Open(url.to_string()));
+        if command == "w" {
+            return Some(Action::Write);
+        }
+
+        if command == "wq" {
+            return Some(Action::WriteQuit);
+        }
+
+        if let Some(target) = command.strip_prefix("e ").map(str::trim) {
+            if !target.is_empty() {
+                return Some(Action::Edit(target.to_string()));
             }
         }
 
@@ -121,19 +136,19 @@ impl App {
 
     fn move_selection(&mut self, amount: isize) {
         let Some(last_index) = self.last_item_index() else {
-            self.selected = None;
+            self.view_state.selected = None;
             return;
         };
-        let selected = self.selected.unwrap_or_default();
-        self.selected = Some(selected.saturating_add_signed(amount).min(last_index));
+        let selected = self.view_state.selected.unwrap_or_default();
+        self.view_state.selected = Some(selected.saturating_add_signed(amount).min(last_index));
     }
 
     fn select_first(&mut self) {
-        self.selected = self.last_item_index().map(|_| 0);
+        self.view_state.selected = self.last_item_index().map(|_| 0);
     }
 
     fn select_last(&mut self) {
-        self.selected = self.last_item_index();
+        self.view_state.selected = self.last_item_index();
     }
 
     fn last_item_index(&self) -> Option<usize> {
@@ -192,17 +207,17 @@ impl Drop for TerminalSession {
 }
 
 /// Run the interactive UI until the user exits it.
-pub fn run(initial_url: Option<&str>) -> Result<(), DynError> {
+pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
     let source = GitHubProjectSource::new()?;
     let token_provider = SystemTokenProvider;
     let mut session = TerminalSession::start()?;
     let mut app = App::default();
 
-    if let Some(url) = initial_url {
-        open_project_with_progress(
+    if let Some(target) = initial_target {
+        edit_target_with_progress(
             &mut session.terminal,
             &mut app,
-            url,
+            target,
             &token_provider,
             &source,
         )?;
@@ -211,14 +226,21 @@ pub fn run(initial_url: Option<&str>) -> Result<(), DynError> {
     while !app.should_quit {
         session.terminal.draw(|frame| render(frame, &app))?;
         if let Event::Key(key) = event::read()? {
-            if let Some(Action::Open(url)) = app.handle_key(key) {
-                open_project_with_progress(
+            match app.handle_key(key) {
+                Some(Action::Edit(target)) => edit_target_with_progress(
                     &mut session.terminal,
                     &mut app,
-                    &url,
+                    &target,
                     &token_provider,
                     &source,
-                )?;
+                )?,
+                Some(Action::Write) => {
+                    write_and_maybe_quit(&mut app, false);
+                }
+                Some(Action::WriteQuit) => {
+                    write_and_maybe_quit(&mut app, true);
+                }
+                None => {}
             }
         }
     }
@@ -226,17 +248,67 @@ pub fn run(initial_url: Option<&str>) -> Result<(), DynError> {
     Ok(())
 }
 
-fn open_project_with_progress(
+fn edit_target_with_progress(
     terminal: &mut Tui,
     app: &mut App,
-    url: &str,
+    target: &str,
     token_provider: &dyn TokenProvider,
     source: &dyn ProjectSource,
 ) -> Result<(), DynError> {
     app.message = Some("Opening project...".into());
     terminal.draw(|frame| render(frame, app))?;
-    open_project(app, url, token_provider, source);
+    edit_target(app, target, token_provider, source);
     Ok(())
+}
+
+fn edit_target(
+    app: &mut App,
+    target: &str,
+    token_provider: &dyn TokenProvider,
+    source: &dyn ProjectSource,
+) {
+    if target.starts_with("https://") || target.starts_with("http://") {
+        open_project(app, target, token_provider, source);
+        return;
+    }
+
+    let path = Path::new(target);
+    if path.exists() {
+        match ViewState::load(path) {
+            Ok(state) => {
+                app.state_path = Some(path.to_path_buf());
+                restore_view_state(app, state, token_provider, source);
+            }
+            Err(error) => app.message = Some(error.to_string()),
+        }
+    } else {
+        app.state_path = Some(path.to_path_buf());
+        app.message = Some(format!("State will be saved to {}", path.display()));
+    }
+}
+
+fn write_state(app: &mut App) -> bool {
+    let Some(path) = &app.state_path else {
+        app.message = Some("No state path; use :e PATH first".into());
+        return false;
+    };
+
+    match app.view_state.save(path) {
+        Ok(()) => {
+            app.message = Some(format!("Saved {}", path.display()));
+            true
+        }
+        Err(error) => {
+            app.message = Some(error.to_string());
+            false
+        }
+    }
+}
+
+fn write_and_maybe_quit(app: &mut App, quit: bool) {
+    if write_state(app) && quit {
+        app.should_quit = true;
+    }
 }
 
 fn open_project(
@@ -254,11 +326,35 @@ fn open_project(
 
     match result {
         Ok(project) => {
-            app.selected = (!project.items.is_empty()).then_some(0);
+            app.view_state.project_url = Some(url.to_string());
+            app.view_state.selected = (!project.items.is_empty()).then_some(0);
             app.project = Some(project);
             app.message = None;
         }
         Err(error) => app.message = Some(error.to_string()),
+    }
+}
+
+fn restore_view_state(
+    app: &mut App,
+    state: ViewState,
+    token_provider: &dyn TokenProvider,
+    source: &dyn ProjectSource,
+) {
+    let Some(url) = state.project_url.clone() else {
+        app.view_state = state;
+        app.project = None;
+        return;
+    };
+    let saved_selection = state.selected;
+    app.view_state = state;
+    app.project = None;
+    open_project(app, &url, token_provider, source);
+    if app.message.is_none() {
+        app.view_state.selected = match (saved_selection, app.last_item_index()) {
+            (Some(selected), Some(last_index)) => Some(selected.min(last_index)),
+            _ => None,
+        };
     }
 }
 
@@ -267,7 +363,7 @@ fn render(frame: &mut Frame, app: &App) {
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
 
     match &app.project {
-        Some(project) => render_project(frame, content_area, project, app.selected),
+        Some(project) => render_project(frame, content_area, project, app.view_state.selected),
         None => frame.render_widget(
             Paragraph::new("No project open")
                 .block(Block::default().borders(Borders::ALL).title(" ghui ")),
@@ -427,6 +523,8 @@ fn kind_label(item: &Item) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use ratatui::backend::TestBackend;
 
     use super::*;
@@ -470,6 +568,14 @@ mod tests {
         }
     }
 
+    fn temp_state_path(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{unique}.json", std::process::id()))
+    }
+
     #[test]
     fn q_command_quits() {
         let mut app = App::default();
@@ -487,7 +593,7 @@ mod tests {
 
         assert_eq!(
             action,
-            Some(Action::Open(
+            Some(Action::Edit(
                 "https://github.com/orgs/example/projects/1".into()
             ))
         );
@@ -508,7 +614,11 @@ mod tests {
 
         assert_eq!(app.project.as_ref().unwrap().items.len(), 3);
         assert_eq!(source.requests()[0].1, "token");
-        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.view_state.selected, Some(0));
+        assert_eq!(
+            app.view_state.project_url.as_deref(),
+            Some("https://github.com/orgs/example/projects/1")
+        );
         assert_eq!(app.message, None);
     }
 
@@ -534,23 +644,23 @@ mod tests {
     fn normal_mode_moves_selection() {
         let mut app = App {
             project: Some(sample_project(20)),
-            selected: Some(0),
+            view_state: ViewState::new(None, Some(0)),
             ..Default::default()
         };
 
         app.handle_key(key(KeyCode::Char('j')));
         app.handle_key(key(KeyCode::PageDown));
-        assert_eq!(app.selected, Some(11));
+        assert_eq!(app.view_state.selected, Some(11));
 
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.selected, Some(10));
+        assert_eq!(app.view_state.selected, Some(10));
 
         app.handle_key(key(KeyCode::Char('g')));
-        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.view_state.selected, Some(0));
 
         app.handle_key(key(KeyCode::Char('G')));
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.selected, Some(19));
+        assert_eq!(app.view_state.selected, Some(19));
     }
 
     #[test]
@@ -596,7 +706,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let app = App {
             project: Some(sample_project(10)),
-            selected: Some(5),
+            view_state: ViewState::new(None, Some(5)),
             ..Default::default()
         };
 
@@ -626,5 +736,119 @@ mod tests {
             })
             .unwrap();
         assert!(selected_row.iter().any(|cell| cell.bg == Color::Cyan));
+    }
+
+    #[test]
+    fn restores_project_and_clamps_saved_selection() {
+        let source = MockProjectSource::returning(sample_project(3));
+        let state = ViewState::new(
+            Some("https://github.com/orgs/example/projects/1".into()),
+            Some(20),
+        );
+        let state = ViewState::from_text(&state.to_text().unwrap()).unwrap();
+        let mut app = App::default();
+
+        restore_view_state(&mut app, state, &FixedToken(Some("token".into())), &source);
+
+        assert_eq!(app.project.as_ref().unwrap().items.len(), 3);
+        assert_eq!(app.view_state.selected, Some(2));
+        assert_eq!(source.requests().len(), 1);
+    }
+
+    #[test]
+    fn edit_existing_path_loads_and_restores_state() {
+        let path = temp_state_path("ghui-load-state");
+        ViewState::new(
+            Some("https://github.com/orgs/example/projects/1".into()),
+            Some(1),
+        )
+        .save(&path)
+        .unwrap();
+        let source = MockProjectSource::returning(sample_project(3));
+        let mut app = App::default();
+
+        edit_target(
+            &mut app,
+            path.to_str().unwrap(),
+            &FixedToken(Some("token".into())),
+            &source,
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(app.state_path.as_deref(), Some(path.as_path()));
+        assert_eq!(app.view_state.selected, Some(1));
+        assert_eq!(app.project.as_ref().unwrap().items.len(), 3);
+    }
+
+    #[test]
+    fn edit_missing_path_sets_destination_and_write_saves_state() {
+        let path = temp_state_path("ghui-save-state");
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            view_state: ViewState::new(
+                Some("https://github.com/orgs/example/projects/1".into()),
+                Some(2),
+            ),
+            ..Default::default()
+        };
+
+        edit_target(
+            &mut app,
+            path.to_str().unwrap(),
+            &FixedToken(None),
+            &MockProjectSource::returning(sample_project(0)),
+        );
+        write_state(&mut app);
+
+        assert_eq!(ViewState::load(&path).unwrap(), app.view_state);
+        assert!(app.message.as_deref().unwrap().starts_with("Saved "));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn write_command_requires_a_state_path() {
+        let mut app = App::default();
+
+        assert_eq!(type_command(&mut app, "w"), Some(Action::Write));
+        write_state(&mut app);
+
+        assert_eq!(
+            app.message.as_deref(),
+            Some("No state path; use :e PATH first")
+        );
+    }
+
+    #[test]
+    fn write_quit_command_saves_and_quits() {
+        let path = temp_state_path("ghui-write-quit-state");
+        let mut app = App {
+            state_path: Some(path.clone()),
+            view_state: ViewState::new(
+                Some("https://github.com/orgs/example/projects/1".into()),
+                Some(2),
+            ),
+            ..Default::default()
+        };
+
+        assert_eq!(type_command(&mut app, "wq"), Some(Action::WriteQuit));
+        write_and_maybe_quit(&mut app, true);
+
+        assert!(app.should_quit);
+        assert_eq!(ViewState::load(&path).unwrap(), app.view_state);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn write_quit_stays_open_when_write_fails() {
+        let mut app = App::default();
+
+        assert_eq!(type_command(&mut app, "wq"), Some(Action::WriteQuit));
+        write_and_maybe_quit(&mut app, true);
+
+        assert!(!app.should_quit);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("No state path; use :e PATH first")
+        );
     }
 }

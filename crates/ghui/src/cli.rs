@@ -28,9 +28,9 @@ pub enum Command {
     /// Launch the interactive terminal UI.
     #[cfg(feature = "tui")]
     Tui {
-        /// URL of the GitHub project to open.
-        #[arg(value_name = "URL")]
-        url: Option<String>,
+        /// GitHub project URL or view-state file to open or create.
+        #[arg(value_name = "URL_OR_PATH")]
+        target: Option<String>,
     },
 }
 
@@ -43,7 +43,7 @@ mod tests {
         let without_url = Cli::try_parse_from(["ghui", "tui"]).unwrap();
         assert!(matches!(
             without_url.command,
-            Some(Command::Tui { url: None })
+            Some(Command::Tui { target: None })
         ));
 
         let with_url =
@@ -51,8 +51,8 @@ mod tests {
                 .unwrap();
         assert!(matches!(
             with_url.command,
-            Some(Command::Tui { url: Some(url) })
-                if url == "https://github.com/orgs/example/projects/1"
+            Some(Command::Tui { target: Some(target) })
+                if target == "https://github.com/orgs/example/projects/1"
         ));
     }
 }

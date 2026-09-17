@@ -29,7 +29,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         Some(Command::Login) => commands::login::run(cli.verbose),
         Some(Command::View { url }) => commands::view::run(url),
         #[cfg(feature = "tui")]
-        Some(Command::Tui { url }) => tui::run(url.as_deref()),
+        Some(Command::Tui { target }) => tui::run(target.as_deref()),
         None => {
             // TODO: consider launching the TUI (when enabled) as the default mode.
             let mut cmd = Cli::command();
