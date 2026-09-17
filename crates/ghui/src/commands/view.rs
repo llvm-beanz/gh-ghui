@@ -156,6 +156,7 @@ mod tests {
         Project {
             title: "Demo".into(),
             field_names: vec!["Status".into(), "Estimate".into()],
+            mutable_field_names: vec!["Status".into(), "Estimate".into()],
             items: vec![
                 Item {
                     content: Some(Content {
@@ -252,6 +253,7 @@ mod tests {
         let project = Project {
             title: "P".into(),
             field_names: vec!["Status".into()],
+            mutable_field_names: vec!["Status".into()],
             items: vec![Item {
                 content: None,
                 fields: vec![("Status".into(), "Todo".into())],
@@ -266,6 +268,7 @@ mod tests {
             render_table(&Project {
                 title: "Empty".into(),
                 field_names: vec![],
+                mutable_field_names: vec![],
                 items: vec![],
             })
             .lines()

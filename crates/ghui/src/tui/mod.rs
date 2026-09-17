@@ -14,7 +14,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
@@ -34,6 +34,7 @@ struct App {
     view_state: ViewState,
     state_path: Option<PathBuf>,
     column_selected: usize,
+    active_column: Option<String>,
     message: Option<String>,
     should_quit: bool,
 }
@@ -44,6 +45,7 @@ enum Mode {
     Normal,
     Command,
     Columns,
+    Active,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -68,6 +70,7 @@ impl App {
             Mode::Normal => self.handle_normal_key(key.code),
             Mode::Command => self.handle_command_key(key.code),
             Mode::Columns => self.handle_columns_key(key.code),
+            Mode::Active => self.handle_active_key(key.code),
         }
     }
 
@@ -84,6 +87,7 @@ impl App {
             KeyCode::PageUp => self.move_selection(-10),
             KeyCode::Home | KeyCode::Char('g') => self.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.select_last(),
+            KeyCode::Enter => self.activate_selected_row(),
             _ => {}
         }
         None
@@ -124,6 +128,21 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => {
                 self.column_selected = self.available_columns().len().saturating_sub(1);
             }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_active_key(&mut self, key: KeyCode) -> Option<Action> {
+        match key {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.active_column = None;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            KeyCode::Tab => self.cycle_active_column(1),
+            KeyCode::BackTab => self.cycle_active_column(-1),
             _ => {}
         }
         None
@@ -195,6 +214,9 @@ impl App {
             .as_ref()
             .map(project_columns)
             .unwrap_or_default()
+            .into_iter()
+            .map(|column| column.name)
+            .collect()
     }
 
     fn toggle_selected_column(&mut self) {
@@ -217,6 +239,48 @@ impl App {
                     .unwrap_or(usize::MAX)
             });
         }
+    }
+
+    fn mutable_columns(&self) -> Vec<String> {
+        let enabled = self.view_state.columns.as_deref();
+        self.project
+            .as_ref()
+            .map(project_columns)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|column| {
+                column.mutable
+                    && enabled.is_none_or(|enabled| enabled.contains(&column.name))
+            })
+            .map(|column| column.name)
+            .collect()
+    }
+
+    fn activate_selected_row(&mut self) {
+        if self.view_state.selected.is_none() {
+            return;
+        }
+        let mut columns = self.mutable_columns().into_iter();
+        if let Some(column) = columns.next() {
+            self.active_column = Some(column);
+            self.mode = Mode::Active;
+        }
+    }
+
+    fn cycle_active_column(&mut self, amount: isize) {
+        let columns = self.mutable_columns();
+        if columns.is_empty() {
+            self.active_column = None;
+            self.mode = Mode::Normal;
+            return;
+        }
+        let selected = self
+            .active_column
+            .as_ref()
+            .and_then(|active| columns.iter().position(|column| column == active))
+            .unwrap_or_default();
+        let index = (selected as isize + amount).rem_euclid(columns.len() as isize) as usize;
+        self.active_column = Some(columns[index].clone());
     }
 }
 
@@ -431,6 +495,7 @@ fn render(frame: &mut Frame, app: &App) {
             project,
             app.view_state.selected,
             app.view_state.columns.as_deref(),
+            (app.mode == Mode::Active).then_some(app.active_column.as_deref()).flatten(),
         ),
         None => frame.render_widget(
             Paragraph::new("No project open")
@@ -449,6 +514,7 @@ fn render(frame: &mut Frame, app: &App) {
         Mode::Normal => normal_status(app.message.as_deref()),
         Mode::Command => Line::from(format!(":{}", app.command)),
         Mode::Columns => Line::from(" COLUMNS  Space toggle  Enter/Esc close "),
+        Mode::Active => Line::from(" ACTIVE  Tab cycle  Up/Down move  Enter/Esc close "),
     };
     frame.render_widget(Paragraph::new(status), status_content_area);
     frame.render_widget(
@@ -475,6 +541,7 @@ fn render_project(
     project: &Project,
     selected: Option<usize>,
     enabled_columns: Option<&[String]>,
+    active_column: Option<&str>,
 ) {
     let block = Block::default().borders(Borders::ALL).title(format!(
         " {} - {} items ",
@@ -486,10 +553,12 @@ fn render_project(
 
     let [header_area, rows_area] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
-    let table = project_table(project, enabled_columns);
+    let table = project_table(project, enabled_columns, selected, active_column);
     frame.render_widget(Paragraph::new(table.header), header_area);
-    let rows =
-        List::new(table.rows).highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    let mut rows = List::new(table.rows);
+    if active_column.is_none() {
+        rows = rows.highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    }
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(rows, rows_area, &mut state);
 }
@@ -546,10 +615,18 @@ struct ProjectTable {
     rows: Vec<ListItem<'static>>,
 }
 
-fn project_table(project: &Project, enabled_columns: Option<&[String]>) -> ProjectTable {
+fn project_table(
+    project: &Project,
+    enabled_columns: Option<&[String]>,
+    selected: Option<usize>,
+    active_column: Option<&str>,
+) -> ProjectTable {
     let columns = project_columns(project)
         .into_iter()
-        .filter(|column| enabled_columns.is_none_or(|enabled| enabled.contains(column)))
+        .filter(|column| {
+            enabled_columns.is_none_or(|enabled| enabled.contains(&column.name))
+        })
+        .map(|column| column.name)
         .collect::<Vec<_>>();
     let header = columns.clone();
 
@@ -619,17 +696,64 @@ fn project_table(project: &Project, enabled_columns: Option<&[String]>) -> Proje
     ];
     let rows = rows
         .iter()
-        .map(|row| ListItem::new(format_row(row)))
+        .enumerate()
+        .map(|(row_index, row)| {
+            let spans = row.iter().enumerate().map(|(column_index, cell)| {
+                let suffix = if column_index + 1 == row.len() { "" } else { "  " };
+                let content = format!(
+                    "{:<width$}{suffix}",
+                    cell,
+                    width = widths[column_index]
+                );
+                if selected == Some(row_index)
+                    && active_column == Some(columns[column_index].as_str())
+                {
+                    Span::styled(
+                        content,
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else if selected == Some(row_index) && active_column.is_some() {
+                    Span::styled(
+                        content,
+                        Style::default().fg(Color::Black).bg(Color::Cyan),
+                    )
+                } else {
+                    Span::raw(content)
+                }
+            });
+            ListItem::new(Line::from(spans.collect::<Vec<_>>()))
+        })
         .collect();
     ProjectTable { header, rows }
 }
 
-fn project_columns(project: &Project) -> Vec<String> {
-    let mut columns = vec!["#".into(), "Type".into(), "Title".into()];
-    columns.extend(project.field_names.iter().cloned());
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectColumn {
+    name: String,
+    mutable: bool,
+}
+
+fn project_columns(project: &Project) -> Vec<ProjectColumn> {
+    let mut columns = ["#", "Type", "Title"]
+        .into_iter()
+        .map(|name| ProjectColumn {
+            name: name.into(),
+            mutable: false,
+        })
+        .collect::<Vec<_>>();
+    columns.extend(project.field_names.iter().map(|name| ProjectColumn {
+        name: name.clone(),
+        mutable: project.mutable_field_names.contains(name),
+    }));
     for column in field_columns(&project.items) {
-        if !columns.contains(&column) {
-            columns.push(column);
+        if !columns.iter().any(|candidate| candidate.name == column) {
+            columns.push(ProjectColumn {
+                name: column,
+                mutable: true,
+            });
         }
     }
     columns
@@ -689,6 +813,7 @@ mod tests {
         Project {
             title: "Demo".into(),
             field_names: vec!["Status".into()],
+            mutable_field_names: vec!["Status".into()],
             items: (0..item_count)
                 .map(|index| Item {
                     content: Some(Content {
@@ -796,6 +921,96 @@ mod tests {
         app.handle_key(key(KeyCode::Char('G')));
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(app.view_state.selected, Some(19));
+    }
+
+    #[test]
+    fn classifies_project_fields_as_mutable() {
+        let mut project = sample_project(1);
+        project.field_names.push("Priority".into());
+
+        let columns = project_columns(&project);
+
+        assert_eq!(
+            columns,
+            vec![
+                ProjectColumn {
+                    name: "#".into(),
+                    mutable: false,
+                },
+                ProjectColumn {
+                    name: "Type".into(),
+                    mutable: false,
+                },
+                ProjectColumn {
+                    name: "Title".into(),
+                    mutable: false,
+                },
+                ProjectColumn {
+                    name: "Status".into(),
+                    mutable: true,
+                },
+                ProjectColumn {
+                    name: "Priority".into(),
+                    mutable: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn active_mode_cycles_mutable_columns_and_moves_rows() {
+        let mut project = sample_project(3);
+        project.field_names.push("Priority".into());
+        let mut app = App {
+            project: Some(project),
+            view_state: ViewState::new(None, Some(0)),
+            ..Default::default()
+        };
+
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Active);
+        assert_eq!(app.active_column.as_deref(), Some("Status"));
+
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.active_column.as_deref(), Some("Priority"));
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.active_column.as_deref(), Some("Status"));
+        app.handle_key(key(KeyCode::BackTab));
+        assert_eq!(app.active_column.as_deref(), Some("Priority"));
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.view_state.selected, Some(1));
+        assert_eq!(app.mode, Mode::Active);
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.view_state.selected, Some(0));
+    }
+
+    #[test]
+    fn active_mode_highlights_mutable_cell() {
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App {
+            mode: Mode::Active,
+            active_column: Some("Status".into()),
+            project: Some(sample_project(2)),
+            view_state: ViewState::new(None, Some(0)),
+            ..Default::default()
+        };
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let selected_row = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .find(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("Issue 1")
+            })
+            .unwrap();
+        assert!(selected_row.iter().any(|cell| cell.bg == Color::Yellow));
     }
 
     #[test]

@@ -30,7 +30,10 @@ fragment ProjectFields on ProjectV2 {
   title
     fields(first: 100) {
         nodes {
-            ... on ProjectV2FieldCommon { name }
+            __typename
+            ... on ProjectV2Field { name dataType }
+            ... on ProjectV2IterationField { name }
+            ... on ProjectV2SingleSelectField { name }
         }
     }
   items(first: 100, after: $cursor) {
@@ -109,6 +112,7 @@ pub(crate) struct Item {
 pub(crate) struct Project {
     pub(crate) title: String,
     pub(crate) field_names: Vec<String>,
+    pub(crate) mutable_field_names: Vec<String>,
     pub(crate) items: Vec<Item>,
 }
 
@@ -167,6 +171,7 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
     fn fetch_project(&self, project_ref: &ProjectRef, token: &str) -> Result<Project, DynError> {
         let mut title = String::new();
         let mut field_names = Vec::new();
+        let mut mutable_field_names = Vec::new();
         let mut items = Vec::new();
         let mut cursor: Option<String> = None;
 
@@ -195,6 +200,7 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
             if title.is_empty() {
                 title = page.title;
                 field_names = page.field_names;
+                mutable_field_names = page.mutable_field_names;
             }
             items.extend(page.items);
             if page.has_next_page {
@@ -210,6 +216,7 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
         Ok(Project {
             title,
             field_names,
+            mutable_field_names,
             items,
         })
     }
@@ -271,6 +278,7 @@ impl GraphQlTransport for ReqwestGraphQlTransport {
 struct DecodedPage {
     title: String,
     field_names: Vec<String>,
+    mutable_field_names: Vec<String>,
     items: Vec<Item>,
     has_next_page: bool,
     end_cursor: Option<String>,
@@ -296,13 +304,16 @@ fn decode_project(body: &str) -> Result<DecodedPage, DynError> {
         .or(data.user)
         .and_then(|owner| owner.project)
         .ok_or_else(|| "project not found (check the project URL and your token)".to_string())?;
+    let fields = project.fields.nodes;
     Ok(DecodedPage {
         title: project.title,
-        field_names: project
-            .fields
-            .nodes
+        field_names: fields
+            .iter()
+            .filter_map(|field| (field.name != "Title").then_some(field.name.clone()))
+            .collect(),
+        mutable_field_names: fields
             .into_iter()
-            .filter_map(|field| (field.name != "Title").then_some(field.name))
+            .filter_map(|field| field.is_mutable().then_some(field.name))
             .collect(),
         items: project.items.nodes.into_iter().map(Item::from).collect(),
         has_next_page: project.items.page_info.has_next_page,
@@ -393,7 +404,27 @@ struct ProjectData {
 #[derive(Default, Deserialize)]
 struct FieldsConnection {
     #[serde(default)]
-    nodes: Vec<FieldData>,
+    nodes: Vec<ProjectFieldData>,
+}
+
+#[derive(Default, Deserialize)]
+struct ProjectFieldData {
+    #[serde(default, rename = "__typename")]
+    kind: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "dataType")]
+    data_type: String,
+}
+
+impl ProjectFieldData {
+    fn is_mutable(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "ProjectV2IterationField" | "ProjectV2SingleSelectField"
+        ) || (self.kind == "ProjectV2Field"
+            && matches!(self.data_type.as_str(), "DATE" | "NUMBER" | "TEXT"))
+    }
 }
 
 #[derive(Default, Deserialize)]
