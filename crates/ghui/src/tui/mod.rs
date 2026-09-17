@@ -101,6 +101,7 @@ struct FieldUpdate {
 #[derive(Debug, PartialEq)]
 enum Action {
     Edit(String),
+    Refresh,
     Write,
     WriteQuit,
     UpdateField(FieldUpdate),
@@ -126,6 +127,10 @@ impl App {
                 self.error_dialog = None;
             }
             return None;
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            return Some(Action::Refresh);
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Tab {
@@ -274,6 +279,10 @@ impl App {
 
         if command == "wq" {
             return Some(Action::WriteQuit);
+        }
+
+        if command == "refresh" {
+            return Some(Action::Refresh);
         }
 
         if command == "columns" {
@@ -674,6 +683,12 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
                     &token_provider,
                     &source,
                 )?,
+                Some(Action::Refresh) => refresh_project_with_progress(
+                    &mut session.terminal,
+                    &mut app,
+                    &token_provider,
+                    &source,
+                )?,
                 Some(Action::Write) => {
                     write_and_maybe_quit(&mut app, false);
                 }
@@ -718,6 +733,45 @@ fn edit_target_with_progress(
     terminal.draw(|frame| render(frame, app))?;
     edit_target(app, target, token_provider, source);
     Ok(())
+}
+
+fn refresh_project_with_progress(
+    terminal: &mut Tui,
+    app: &mut App,
+    token_provider: &dyn TokenProvider,
+    source: &dyn ProjectSource,
+) -> Result<(), DynError> {
+    app.message = Some("Refreshing project...".into());
+    app.error_dialog = None;
+    terminal.draw(|frame| render(frame, app))?;
+    refresh_project(app, token_provider, source);
+    Ok(())
+}
+
+fn refresh_project(app: &mut App, token_provider: &dyn TokenProvider, source: &dyn ProjectSource) {
+    let Some(url) = app.view().project_url.clone() else {
+        app.show_error("No project open");
+        return;
+    };
+    let result = parse_project_url(&url).and_then(|project_ref| {
+        let token = token_provider
+            .token()
+            .ok_or("no GitHub token found; set GITHUB_TOKEN or run `ghui login`")?;
+        source.fetch_project(&project_ref, &token)
+    });
+    match result {
+        Ok(project) => {
+            let selected = match (app.view().selected, project.items.len().checked_sub(1)) {
+                (Some(selected), Some(last_index)) => Some(selected.min(last_index)),
+                _ => None,
+            };
+            app.tab_mut().project = Some(project);
+            app.view_mut().selected = selected;
+            app.leave_transient_mode();
+            app.message = Some("Project refreshed".into());
+        }
+        Err(error) => app.show_error(error.to_string()),
+    }
 }
 
 fn edit_target(
@@ -1387,6 +1441,74 @@ mod tests {
             Some(Action::PreviousTab)
         );
         assert_eq!(type_command(&mut app, "tabclose"), Some(Action::CloseTab));
+    }
+
+    #[test]
+    fn refresh_command_and_shortcut_return_refresh_action() {
+        let mut app = App::default();
+
+        assert_eq!(type_command(&mut app, "refresh"), Some(Action::Refresh));
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            Some(Action::Refresh)
+        );
+    }
+
+    #[test]
+    fn refresh_replaces_only_current_project_and_preserves_view() {
+        let url = "https://github.com/orgs/example/projects/1";
+        let first_project = sample_project(1);
+        let mut stale_project = sample_project(5);
+        stale_project.title = "Stale".into();
+        let mut refreshed_project = sample_project(2);
+        refreshed_project.title = "Fresh".into();
+        let source = MockProjectSource::returning(refreshed_project);
+        let mut active_view = ViewState::new(Some(url.into()), Some(4));
+        active_view.columns = Some(vec!["Title".into()]);
+        let mut app = App {
+            tabs: vec![
+                RuntimeTab {
+                    project: Some(first_project),
+                    view: ViewState::default(),
+                },
+                RuntimeTab {
+                    project: Some(stale_project),
+                    view: active_view,
+                },
+            ],
+            active_tab: 1,
+            ..Default::default()
+        };
+
+        refresh_project(&mut app, &FixedToken(Some("token".into())), &source);
+
+        assert_eq!(app.tabs[0].project.as_ref().unwrap().title, "Demo");
+        assert_eq!(app.project().unwrap().title, "Fresh");
+        assert_eq!(app.view().selected, Some(1));
+        assert_eq!(app.view().columns, Some(vec!["Title".into()]));
+        assert_eq!(app.message.as_deref(), Some("Project refreshed"));
+        assert_eq!(source.requests().len(), 1);
+    }
+
+    #[test]
+    fn failed_refresh_keeps_current_project_and_shows_error() {
+        let mut app = app_with_project(
+            sample_project(2),
+            ViewState::new(
+                Some("https://github.com/orgs/example/projects/1".into()),
+                Some(1),
+            ),
+        );
+
+        refresh_project(
+            &mut app,
+            &FixedToken(Some("token".into())),
+            &MockProjectSource::failing("refresh failed"),
+        );
+
+        assert_eq!(app.project().unwrap().items.len(), 2);
+        assert_eq!(app.view().selected, Some(1));
+        assert_eq!(app.error_dialog.as_deref(), Some("refresh failed"));
     }
 
     #[test]

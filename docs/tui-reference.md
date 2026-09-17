@@ -17,6 +17,7 @@ These shortcuts work in every mode.
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+C` | Quit immediately |
+| `Ctrl+R` | Refresh the active tab's project from GitHub |
 | `Ctrl+Tab` | Switch to the next tab |
 | `Ctrl+Shift+Tab` | Switch to the previous tab |
 
@@ -120,6 +121,7 @@ Press `:` in normal mode, type a command without the leading colon, and press
 | `:e URL` | Open a GitHub project in the active tab |
 | `:e PATH` | Load a session from an existing path, or configure a missing path for future saves |
 | `:columns` | Open the columns menu for the active tab |
+| `:refresh` | Refresh the active tab's project from GitHub |
 | `:tabnew` | Duplicate the active project and view in a new tab |
 | `:tabnew URL` | Open a GitHub project in a new tab |
 | `:tabnext` or `:tabn` | Switch to the next tab |
@@ -144,3 +146,7 @@ A saved session is readable JSON containing:
 
 Fetched project data is not saved. Loading a session fetches each project again
 from GitHub so the displayed data is current.
+
+Use `:refresh` or `Ctrl+R` to fetch the active tab's project again without
+changing its visible columns. The selected row is retained when possible and
+clamped if the refreshed project has fewer items.
