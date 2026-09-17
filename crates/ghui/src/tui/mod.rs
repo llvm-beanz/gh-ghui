@@ -18,11 +18,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
+use unicode_width::UnicodeWidthStr;
 
 use crate::commands::login;
 use crate::github::{
-    parse_project_url, DynError, EditableField, EditableFieldKind, FieldValue, GitHubProjectSource,
-    Item, Kind, Project, ProjectSource,
+    emoji_status, parse_project_url, DynError, EditableField, EditableFieldKind, FieldValue,
+    GitHubProjectSource, Item, Kind, Project, ProjectSource, STATUS_COLUMN,
 };
 use state::{SessionState, ViewState};
 
@@ -50,6 +51,7 @@ struct App {
     field_editor: Option<FieldEditor>,
     message: Option<String>,
     error_dialog: Option<String>,
+    legend_dialog: bool,
     should_quit: bool,
 }
 
@@ -70,6 +72,7 @@ impl Default for App {
             field_editor: None,
             message: None,
             error_dialog: None,
+            legend_dialog: false,
             should_quit: false,
         }
     }
@@ -138,6 +141,13 @@ impl App {
             return None;
         }
 
+        if self.legend_dialog {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('?')) {
+                self.legend_dialog = false;
+            }
+            return None;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
             return Some(Action::Refresh);
         }
@@ -169,6 +179,7 @@ impl App {
                 self.message = None;
                 self.mode = Mode::Command;
             }
+            KeyCode::Char('?') => self.legend_dialog = true,
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::PageDown => self.move_selection(10),
@@ -310,6 +321,11 @@ impl App {
 
         if command == "refresh" {
             return Some(Action::Refresh);
+        }
+
+        if command == "legend" || command == "emoji" {
+            self.legend_dialog = true;
+            return None;
         }
 
         if command == "columns" {
@@ -1096,6 +1112,9 @@ fn render(frame: &mut Frame, app: &App) {
     if let Some(error) = app.error_dialog.as_deref() {
         render_error_dialog(frame, error);
     }
+    if app.legend_dialog {
+        render_legend_dialog(frame);
+    }
 }
 
 fn render_project(
@@ -1204,6 +1223,18 @@ fn render_error_dialog(frame: &mut Frame, error: &str) {
     );
 }
 
+fn render_legend_dialog(frame: &mut Frame) {
+    let area = centered_rect(45, 55, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(
+            "🟢  Open PR\n🛑  Closed PR\n🏁  Merged PR\n⚠️  Open Issue\n✅  Fixed Issue\n🏃  In Progress Issue\n❓  Duplicate Issue\n❌  Closed Issue\n\nEnter, Esc, or ? to dismiss",
+        )
+        .block(Block::default().borders(Borders::ALL).title(" Status legend ")),
+        area,
+    );
+}
+
 fn centered_rect(
     percent_x: u16,
     percent_y: u16,
@@ -1273,6 +1304,7 @@ fn project_table(
             columns
                 .iter()
                 .map(|column| match column.as_str() {
+                    STATUS_COLUMN => emoji_status(item).to_string(),
                     "#" => number.clone(),
                     "Type" => kind_label(item).to_string(),
                     "Title" => title.clone(),
@@ -1286,17 +1318,22 @@ fn project_table(
         })
         .collect();
 
-    let mut widths: Vec<usize> = header.iter().map(|cell| cell.chars().count()).collect();
+    let mut widths: Vec<usize> = header.iter().map(|cell| cell.width()).collect();
     for row in &rows {
         for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
+            widths[index] = widths[index].max(cell.width());
         }
     }
     let format_row = |cells: &[String]| {
         cells
             .iter()
             .enumerate()
-            .map(|(index, cell)| format!("{:<width$}", cell, width = widths[index]))
+            .map(|(index, cell)| {
+                format!(
+                    "{cell}{}",
+                    " ".repeat(widths[index].saturating_sub(cell.width()))
+                )
+            })
             .collect::<Vec<_>>()
             .join("  ")
     };
@@ -1324,7 +1361,10 @@ fn project_table(
                 } else {
                     "  "
                 };
-                let content = format!("{:<width$}{suffix}", cell, width = widths[column_index]);
+                let content = format!(
+                    "{cell}{}{suffix}",
+                    " ".repeat(widths[column_index].saturating_sub(cell.width()))
+                );
                 if selected == Some(row_index)
                     && active_column == Some(columns[column_index].as_str())
                 {
@@ -1354,17 +1394,23 @@ struct ProjectColumn {
 }
 
 fn project_columns(project: &Project) -> Vec<ProjectColumn> {
-    let mut columns = ["#", "Type", "Title"]
+    let mut columns = [STATUS_COLUMN, "#", "Type", "Title"]
         .into_iter()
         .map(|name| ProjectColumn {
             name: name.into(),
             mutable: false,
         })
         .collect::<Vec<_>>();
-    columns.extend(project.field_names.iter().map(|name| ProjectColumn {
-        name: name.clone(),
-        mutable: project.mutable_field_names.contains(name),
-    }));
+    columns.extend(
+        project
+            .field_names
+            .iter()
+            .filter(|name| name.as_str() != STATUS_COLUMN)
+            .map(|name| ProjectColumn {
+                name: name.clone(),
+                mutable: project.mutable_field_names.contains(name),
+            }),
+    );
     for column in field_columns(&project.items) {
         if !columns.iter().any(|candidate| candidate.name == column) {
             columns.push(ProjectColumn {
@@ -1452,6 +1498,8 @@ mod tests {
                     id: format!("item-{index}"),
                     content: Some(Content {
                         kind: Kind::Issue,
+                        state: crate::github::ContentState::Open,
+                        state_reason: None,
                         number: Some(index as u32 + 1),
                         title: Some(format!("Issue {}", index + 1)),
                         url: None,
@@ -1487,6 +1535,50 @@ mod tests {
         assert_eq!(type_command(&mut app, "q"), None);
 
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn legend_opens_from_shortcut_and_commands_and_blocks_input() {
+        let mut app = App::default();
+
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.legend_dialog);
+        app.handle_key(key(KeyCode::Char(':')));
+        assert_eq!(app.mode, Mode::Normal);
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.legend_dialog);
+
+        type_command(&mut app, "legend");
+        assert!(app.legend_dialog);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(!app.legend_dialog);
+
+        type_command(&mut app, "emoji");
+        assert!(app.legend_dialog);
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(60)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for description in [
+            "Open PR",
+            "Closed PR",
+            "Merged PR",
+            "Open Issue",
+            "Fixed Issue",
+            "In Progress Issue",
+            "Duplicate Issue",
+            "Closed Issue",
+        ] {
+            assert!(screen.contains(description));
+        }
     }
 
     #[test]
@@ -1751,6 +1843,10 @@ mod tests {
             columns,
             vec![
                 ProjectColumn {
+                    name: STATUS_COLUMN.into(),
+                    mutable: false,
+                },
+                ProjectColumn {
                     name: "#".into(),
                     mutable: false,
                 },
@@ -1976,7 +2072,14 @@ mod tests {
         assert_eq!(app.mode, Mode::Columns);
         assert_eq!(
             app.available_columns(),
-            vec!["#", "Type", "Title", "Status", "Release notes"]
+            vec![
+                STATUS_COLUMN,
+                "#",
+                "Type",
+                "Title",
+                "Status",
+                "Release notes"
+            ]
         );
 
         app.handle_key(key(KeyCode::Char(' ')));
@@ -1988,6 +2091,7 @@ mod tests {
         assert_eq!(
             app.view().columns,
             Some(vec![
+                "Type".into(),
                 "Title".into(),
                 "Status".into(),
                 "Release notes".into()

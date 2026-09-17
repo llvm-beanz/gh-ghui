@@ -43,7 +43,30 @@ Normal mode navigates project items and enters other modes.
 | `g` or `Home` | Select the first item |
 | `G` or `End` | Select the last item |
 | `Enter` | Activate the selected row and its first visible editable field |
+| `?` | Open the item status emoji legend |
 | `:` | Enter command mode |
+
+## Item status
+
+The generated `State` column summarizes each item's type and state. It is
+available in both `ghui view` and the TUI and can be hidden from the TUI's
+columns menu.
+
+| State | Emoji |
+| --- | --- |
+| Open PR | 🟢 |
+| Closed PR | 🛑 |
+| Merged PR | 🏁 |
+| Open Issue | ⚠️ |
+| Fixed Issue | ✅ |
+| In Progress Issue | 🏃 |
+| Duplicate Issue | ❓ |
+| Closed Issue | ❌ |
+
+Issue classification uses the project `Status` and `Labels` values when they
+identify In Progress or Duplicate items. Closed-as-completed issues and issues
+with a Fixed, Done, or Completed status are treated as fixed; other closed
+issues use the closed marker.
 
 ## Active row mode
 
@@ -130,6 +153,7 @@ Press `:` in normal mode, type a command without the leading colon, and press
 | `:e PATH` | Load a session from an existing path, or configure a missing path for future saves |
 | `:columns` | Open the columns menu for the active tab |
 | `:refresh` | Refresh the active tab's project from GitHub |
+| `:legend` or `:emoji` | Open the item status emoji legend |
 | `:tabnew` | Duplicate the active project and view in a new tab |
 | `:tabnew URL` | Open a GitHub project in a new tab |
 | `:tabnext` or `:tabn` | Switch to the next tab |

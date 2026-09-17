@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 use std::io::{self, Write};
+use unicode_width::UnicodeWidthStr;
 
 use super::login;
 use crate::github::{
-    parse_project_url, DynError, GitHubProjectSource, Item, Kind, Project, ProjectSource,
+    emoji_status, parse_project_url, DynError, GitHubProjectSource, Item, Kind, Project,
+    ProjectSource, STATUS_COLUMN,
 };
 
 /// Run the `view` command: resolve the URL, fetch the project, print the table.
@@ -53,7 +55,12 @@ fn execute_view(
 
 fn render_table(project: &Project) -> String {
     let columns = field_columns(&project.items);
-    let mut header: Vec<String> = vec!["#".into(), "Type".into(), "Title".into()];
+    let mut header: Vec<String> = vec![
+        STATUS_COLUMN.into(),
+        "#".into(),
+        "Type".into(),
+        "Title".into(),
+    ];
     header.extend(columns.iter().cloned());
 
     let rows: Vec<Vec<String>> = project
@@ -76,7 +83,12 @@ fn render_table(project: &Project) -> String {
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_str()))
                 .collect();
-            let mut row = vec![number, kind_label(item).to_string(), title];
+            let mut row = vec![
+                emoji_status(item).into(),
+                number,
+                kind_label(item).to_string(),
+                title,
+            ];
             for column in &columns {
                 row.push(
                     values
@@ -90,10 +102,10 @@ fn render_table(project: &Project) -> String {
         })
         .collect();
 
-    let mut widths: Vec<usize> = header.iter().map(|cell| cell.chars().count()).collect();
+    let mut widths: Vec<usize> = header.iter().map(|cell| cell.width()).collect();
     for row in &rows {
         for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
+            widths[index] = widths[index].max(cell.width());
         }
     }
 
@@ -101,7 +113,12 @@ fn render_table(project: &Project) -> String {
         cells
             .iter()
             .enumerate()
-            .map(|(index, cell)| format!("{:<width$}", cell, width = widths[index]))
+            .map(|(index, cell)| {
+                format!(
+                    "{cell}{}",
+                    " ".repeat(widths[index].saturating_sub(cell.width()))
+                )
+            })
             .collect::<Vec<_>>()
             .join("  ")
     };
@@ -122,7 +139,7 @@ fn field_columns(items: &[Item]) -> Vec<String> {
     let mut columns = Vec::new();
     for item in items {
         for (name, _) in &item.fields {
-            if !columns.contains(name) {
+            if name != STATUS_COLUMN && !columns.contains(name) {
                 columns.push(name.clone());
             }
         }
@@ -164,6 +181,8 @@ mod tests {
                     id: "item-1".into(),
                     content: Some(Content {
                         kind: Kind::Issue,
+                        state: crate::github::ContentState::Open,
+                        state_reason: None,
                         number: Some(42),
                         title: Some("Fix the thing".into()),
                         url: Some("https://github.com/o/r/issues/42".into()),
@@ -177,6 +196,8 @@ mod tests {
                     id: "item-2".into(),
                     content: Some(Content {
                         kind: Kind::PullRequest,
+                        state: crate::github::ContentState::Merged,
+                        state_reason: None,
                         number: Some(7),
                         title: Some("Add feature".into()),
                         url: None,
@@ -244,12 +265,15 @@ mod tests {
         let table = render_table(&sample_project());
         let lines: Vec<&str> = table.lines().collect();
         assert_eq!(lines.len(), 4);
-        assert_eq!(collapse_spaces(lines[0]), "# Type Title Status Estimate");
+        assert_eq!(
+            collapse_spaces(lines[0]),
+            "State # Type Title Status Estimate"
+        );
         assert_eq!(
             collapse_spaces(lines[2]),
-            "42 Issue Fix the thing In Progress 3"
+            "🏃 42 Issue Fix the thing In Progress 3"
         );
-        assert_eq!(collapse_spaces(lines[3]), "7 PR Add feature Done");
+        assert_eq!(collapse_spaces(lines[3]), "🏁 7 PR Add feature Done");
     }
 
     #[test]
@@ -266,11 +290,7 @@ mod tests {
                 fields: vec![("Status".into(), "Todo".into())],
             }],
         };
-        assert!(render_table(&project)
-            .lines()
-            .nth(2)
-            .unwrap()
-            .starts_with('-'));
+        assert!(collapse_spaces(render_table(&project).lines().nth(2).unwrap()).starts_with('-'));
         assert_eq!(
             render_table(&Project {
                 id: "project-id".into(),

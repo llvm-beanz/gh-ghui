@@ -119,8 +119,8 @@ fragment ProjectFields on ProjectV2 {
       }
       content {
         __typename
-        ... on Issue { number title url }
-        ... on PullRequest { number title url }
+        ... on Issue { number title url state stateReason }
+        ... on PullRequest { number title url state }
       }
     }
   }
@@ -164,12 +164,83 @@ pub(crate) enum Kind {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ContentState {
+    Open,
+    Closed,
+    Merged,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Content {
     pub(crate) kind: Kind,
+    pub(crate) state: ContentState,
+    pub(crate) state_reason: Option<String>,
     pub(crate) number: Option<u32>,
     pub(crate) title: Option<String>,
     pub(crate) url: Option<String>,
+}
+
+pub(crate) const STATUS_COLUMN: &str = "State";
+
+pub(crate) fn emoji_status(item: &Item) -> &'static str {
+    let Some(content) = &item.content else {
+        return "";
+    };
+    match content.kind {
+        Kind::PullRequest => match content.state {
+            ContentState::Open => "🟢",
+            ContentState::Closed => "🛑",
+            ContentState::Merged => "🏁",
+            ContentState::Unknown => "",
+        },
+        Kind::Issue => {
+            let status = item_field(item, "Status");
+            let labels = item_field(item, "Labels");
+            if status.is_some_and(|value| normalized(value).contains("duplicate"))
+                || labels.is_some_and(|value| {
+                    value
+                        .split(',')
+                        .any(|label| normalized(label) == "duplicate")
+                })
+            {
+                "❓"
+            } else if status.is_some_and(|value| normalized(value) == "inprogress") {
+                "🏃"
+            } else if content.state == ContentState::Closed
+                && (content.state_reason.as_deref() == Some("COMPLETED")
+                    || status.is_some_and(|value| {
+                        matches!(normalized(value).as_str(), "fixed" | "done" | "completed")
+                    }))
+            {
+                "✅"
+            } else if content.state == ContentState::Closed {
+                "❌"
+            } else if content.state == ContentState::Open {
+                "⚠️"
+            } else {
+                ""
+            }
+        }
+        Kind::Other => "",
+    }
+}
+
+fn item_field<'a>(item: &'a Item, name: &str) -> Option<&'a str> {
+    item.fields
+        .iter()
+        .find(|(field, _)| field.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn normalized(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -977,6 +1048,10 @@ struct ContentData {
     #[serde(rename = "__typename")]
     kind: Option<String>,
     #[serde(default)]
+    state: Option<String>,
+    #[serde(default, rename = "stateReason")]
+    state_reason: Option<String>,
+    #[serde(default)]
     number: Option<u32>,
     #[serde(default)]
     title: Option<String>,
@@ -992,6 +1067,13 @@ impl From<ItemData> for Item {
                 Some("PullRequest") => Kind::PullRequest,
                 _ => Kind::Other,
             },
+            state: match content.state.as_deref() {
+                Some("OPEN") => ContentState::Open,
+                Some("CLOSED") => ContentState::Closed,
+                Some("MERGED") => ContentState::Merged,
+                _ => ContentState::Unknown,
+            },
+            state_reason: content.state_reason,
             number: content.number,
             title: content.title,
             url: content.url,
@@ -1201,6 +1283,78 @@ mod tests {
     }
 
     #[test]
+    fn derives_all_emoji_statuses() {
+        let item = |kind, state, state_reason: Option<&str>, fields: &[(&str, &str)]| Item {
+            id: "item".into(),
+            content: Some(Content {
+                kind,
+                state,
+                state_reason: state_reason.map(str::to_string),
+                number: None,
+                title: None,
+                url: None,
+            }),
+            fields: fields
+                .iter()
+                .map(|(name, value)| ((*name).into(), (*value).into()))
+                .collect(),
+        };
+
+        assert_eq!(
+            emoji_status(&item(Kind::PullRequest, ContentState::Open, None, &[])),
+            "🟢"
+        );
+        assert_eq!(
+            emoji_status(&item(Kind::PullRequest, ContentState::Closed, None, &[])),
+            "🛑"
+        );
+        assert_eq!(
+            emoji_status(&item(Kind::PullRequest, ContentState::Merged, None, &[])),
+            "🏁"
+        );
+        assert_eq!(
+            emoji_status(&item(Kind::Issue, ContentState::Open, None, &[])),
+            "⚠️"
+        );
+        assert_eq!(
+            emoji_status(&item(
+                Kind::Issue,
+                ContentState::Closed,
+                Some("COMPLETED"),
+                &[]
+            )),
+            "✅"
+        );
+        assert_eq!(
+            emoji_status(&item(
+                Kind::Issue,
+                ContentState::Open,
+                None,
+                &[("Status", "In Progress")],
+            )),
+            "🏃"
+        );
+        assert_eq!(
+            emoji_status(&item(
+                Kind::Issue,
+                ContentState::Closed,
+                Some("NOT_PLANNED"),
+                &[("Labels", "bug, duplicate")],
+            )),
+            "❓"
+        );
+        assert_eq!(
+            emoji_status(&item(
+                Kind::Issue,
+                ContentState::Closed,
+                Some("NOT_PLANNED"),
+                &[],
+            )),
+            "❌"
+        );
+    }
+
+    #[test]
     fn decodes_project_field_values() {
         let response = serde_json::json!({
             "data": { "organization": { "project": {
@@ -1243,7 +1397,7 @@ mod tests {
                             { "__typename": "ProjectV2ItemFieldMilestoneValue", "field": { "name": "Milestone" }, "milestone": { "title": "v1.0" } },
                             { "__typename": "ProjectV2ItemFieldMultiSelectValue", "field": { "name": "Components" }, "options": [{ "name": "API" }, { "name": "TUI" }] }
                         ] },
-                        "content": { "__typename": "Issue", "number": 42, "title": "Fix", "url": "https://github.com/o/r/issues/42" }
+                        "content": { "__typename": "Issue", "state": "OPEN", "stateReason": "REOPENED", "number": 42, "title": "Fix", "url": "https://github.com/o/r/issues/42" }
                     }]
                 }
             } } }
@@ -1270,6 +1424,19 @@ mod tests {
             ]
         );
         assert_eq!(page.items[0].id, "item-id");
+        assert_eq!(
+            page.items[0].content.as_ref().unwrap().state,
+            ContentState::Open
+        );
+        assert_eq!(
+            page.items[0]
+                .content
+                .as_ref()
+                .unwrap()
+                .state_reason
+                .as_deref(),
+            Some("REOPENED")
+        );
         assert_eq!(
             page.editable_fields[0].kind,
             EditableFieldKind::SingleSelect
