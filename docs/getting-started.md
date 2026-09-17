@@ -33,6 +33,9 @@ Use `:tabnew` to open another view of the current project, or
 Saving with `:w` or `:wq` records every open tab, each tab's selected row and
 columns, and the active tab.
 
+See the [TUI reference](tui-reference.md) for the complete command and shortcut
+list.
+
 ## Permissions
 
 Login requests only the `read:project` OAuth scope. GitHub does not offer a

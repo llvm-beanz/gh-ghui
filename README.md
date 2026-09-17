@@ -46,6 +46,7 @@ available without the broad `repo` scope.
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
+- [TUI reference](docs/tui-reference.md)
 
 ## License
 

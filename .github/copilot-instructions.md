@@ -1,6 +1,6 @@
 # ghui — workspace instructions
 
-Project: Rust Cargo workspace (resolver = "2") providing the `ghui` CLI for working with GitHub projects. The project is an early stub: structure, CLI skeleton, and docs layout are in place; subcommands are mostly TODO placeholders.
+Project: Rust Cargo workspace (resolver = "2") providing the `ghui` CLI and interactive TUI for working with GitHub projects.
 
 ## Structure
 - `crates/ghui/` — main CLI crate.
@@ -12,10 +12,17 @@ Project: Rust Cargo workspace (resolver = "2") providing the `ghui` CLI for work
 - `.github/` — project metadata and this file.
 
 ## Build & run
-- `cargo build` — non-interactive mode only.
-- `cargo build --features tui` — also builds the interactive TUI.
+- `cargo build` — builds the CLI with the TUI enabled by default.
+- `cargo build --no-default-features` — builds without the interactive TUI.
 - `cargo test --all-features` — runs unit, integration, and doc tests for the workspace.
-- `cargo run -- <subcommand>` to run the CLI (e.g. `cargo run -- list`, `cargo run --features tui -- tui`).
+- `cargo run -- <subcommand>` to run the CLI (e.g. `cargo run -- view <url>` or `cargo run -- tui`).
+
+## Documentation
+- Keep user-facing documentation synchronized with behavior in the same change; implementation work is not complete while the relevant docs describe old commands, shortcuts, arguments, modes, persistence formats, or workflows.
+- Update `docs/tui-reference.md` whenever TUI commands, aliases, keyboard shortcuts, modes, dialogs, field behavior, tabs, or saved-session behavior change.
+- Update `docs/getting-started.md` when installation, build, authentication, startup, or primary workflow guidance changes.
+- Update `README.md` when the project overview, top-level usage examples, or documentation links change.
+- Derive command and shortcut documentation from the implemented parser and key handlers. Do not document planned or assumed behavior as available.
 
 ## Testing
 - Tests are part of the change: when adding or modifying a function, add or update its tests in the same change; do not consider a task complete until `cargo test --all-features` passes.
@@ -33,4 +40,4 @@ Project: Rust Cargo workspace (resolver = "2") providing the `ghui` CLI for work
 - TUI code must stay feature-gated (`#[cfg(feature = "tui")]`); only `ratatui` and `crossterm` (declared as workspace dependencies) may be used there.
 - Add new dependencies to `workspace.dependencies` in the root `Cargo.toml` and reference them from crate manifests.
 - `Cargo.lock` is intentionally committed (binary workspace) — do not ignore it.
-- Keep user-facing docs in `docs/` and update `README.md` when commands or features change.
+- Keep user-facing docs in `docs/`; avoid duplicating the full TUI reference in `README.md`.

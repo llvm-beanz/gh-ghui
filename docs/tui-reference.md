@@ -1,0 +1,136 @@
+# TUI reference
+
+Launch the terminal interface with an optional GitHub project URL or session-state
+file:
+
+```sh
+ghui tui [URL_OR_PATH]
+```
+
+A GitHub Projects URL opens that project. An existing path loads a saved session.
+A path that does not exist becomes the destination used by `:w` and `:wq`.
+
+## Global shortcuts
+
+These shortcuts work in every mode.
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+C` | Quit immediately |
+| `Ctrl+Tab` | Switch to the next tab |
+| `Ctrl+Shift+Tab` | Switch to the previous tab |
+
+## Normal mode
+
+Normal mode navigates project items and enters other modes.
+
+| Shortcut | Action |
+| --- | --- |
+| `j` or `Down` | Select the next item |
+| `k` or `Up` | Select the previous item |
+| `Page Down` | Move down 10 items |
+| `Page Up` | Move up 10 items |
+| `g` or `Home` | Select the first item |
+| `G` or `End` | Select the last item |
+| `Enter` | Activate the selected row and its first visible editable field |
+| `:` | Enter command mode |
+
+## Active row mode
+
+The active cell is highlighted within the selected row. Only visible editable
+project fields participate in field navigation.
+
+| Shortcut | Action |
+| --- | --- |
+| `Tab` | Activate the next editable field, wrapping at the end |
+| `Shift+Tab` | Activate the previous editable field, wrapping at the start |
+| `j` or `Down` | Move to the next item and keep the field active |
+| `k` or `Up` | Move to the previous item and keep the field active |
+| `Enter` | Edit the active field |
+| `Escape` | Return to normal mode |
+
+## Field editor
+
+The editor shown for a field depends on its GitHub Projects field type.
+
+| Field type | Editor | Accepted value |
+| --- | --- | --- |
+| Text | Text input | Free-form text |
+| Number | Text input | A finite number |
+| Date | Text input | A valid calendar date in `YYYY-MM-DD` format |
+| Single select | Selection list | One configured field option |
+| Iteration | Selection list | One configured iteration |
+
+### Text, number, and date input
+
+| Shortcut | Action |
+| --- | --- |
+| Character keys | Insert text at the end of the value |
+| `Backspace` | Delete the last character |
+| `Enter` | Validate and save the value |
+| `Escape` | Cancel and return to active row mode |
+
+Validation errors appear in the status bar and leave the editor open.
+
+### Selection lists
+
+| Shortcut | Action |
+| --- | --- |
+| `j` or `Down` | Select the next option |
+| `k` or `Up` | Select the previous option |
+| `g` or `Home` | Select the first option |
+| `G` or `End` | Select the last option |
+| `Enter` | Save the selected option |
+| `Escape` | Cancel and return to active row mode |
+
+## Columns menu
+
+Open the columns menu with `:columns`. Built-in fields and project-specific
+fields are listed with checkboxes. Column choices apply only to the active tab.
+
+| Shortcut | Action |
+| --- | --- |
+| `j` or `Down` | Select the next column |
+| `k` or `Up` | Select the previous column |
+| `g` or `Home` | Select the first column |
+| `G` or `End` | Select the last column |
+| `Space` | Show or hide the selected column |
+| `Enter` or `Escape` | Close the menu |
+
+## Command mode
+
+Press `:` in normal mode, type a command without the leading colon, and press
+`Enter`. Press `Escape` to cancel command entry.
+
+| Command | Action |
+| --- | --- |
+| `:q` | Quit without saving session state |
+| `:w` | Save the complete session to its configured state path |
+| `:wq` | Save and quit; remain open if saving fails |
+| `:e URL` | Open a GitHub project in the active tab |
+| `:e PATH` | Load a session from an existing path, or configure a missing path for future saves |
+| `:columns` | Open the columns menu for the active tab |
+| `:tabnew` | Duplicate the active project and view in a new tab |
+| `:tabnew URL` | Open a GitHub project in a new tab |
+| `:tabnext` or `:tabn` | Switch to the next tab |
+| `:tabprevious` or `:tabp` | Switch to the previous tab |
+| `:tabclose` or `:tabc` | Close the active tab |
+
+Closing the only tab resets it to an empty tab rather than closing the TUI.
+
+## Tabs and saved sessions
+
+Each tab has independent selected-row and visible-column state. `:tabnew`
+creates another view of the same fetched project, while `:tabnew URL` allows
+multiple projects to be open together.
+
+A saved session is readable JSON containing:
+
+- Every open tab, in tab-bar order
+- Each tab's project URL
+- Each tab's selected row
+- Each tab's visible columns
+- The active tab
+
+Fetched project data is not saved. Loading a session fetches each project again
+from GitHub so the displayed data is current.
