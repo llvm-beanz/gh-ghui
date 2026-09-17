@@ -20,6 +20,15 @@ These shortcuts work in every mode.
 | `Ctrl+Tab` | Switch to the next tab |
 | `Ctrl+Shift+Tab` | Switch to the previous tab |
 
+## Error dialogs
+
+Recoverable TUI errors, including authentication, GitHub API, validation, and
+session-file failures, appear in a modal dialog instead of being written over
+the terminal interface. Press `Enter` or `Escape` to dismiss the dialog.
+
+`Ctrl+C` remains available while an error dialog is open. Other shortcuts are
+blocked until the dialog is dismissed.
+
 ## Normal mode
 
 Normal mode navigates project items and enters other modes.
@@ -70,7 +79,8 @@ The editor shown for a field depends on its GitHub Projects field type.
 | `Enter` | Validate and save the value |
 | `Escape` | Cancel and return to active row mode |
 
-Validation errors appear in the status bar and leave the editor open.
+Validation errors appear in an error dialog and leave the editor open. Dismiss
+the dialog to correct the value.
 
 ### Selection lists
 

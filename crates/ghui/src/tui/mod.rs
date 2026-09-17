@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::commands::login;
@@ -44,6 +44,7 @@ struct App {
     active_column: Option<String>,
     field_editor: Option<FieldEditor>,
     message: Option<String>,
+    error_dialog: Option<String>,
     should_quit: bool,
 }
 
@@ -59,6 +60,7 @@ impl Default for App {
             active_column: None,
             field_editor: None,
             message: None,
+            error_dialog: None,
             should_quit: false,
         }
     }
@@ -116,6 +118,13 @@ impl App {
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return None;
+        }
+
+        if self.error_dialog.is_some() {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+                self.error_dialog = None;
+            }
             return None;
         }
 
@@ -272,7 +281,7 @@ impl App {
                 self.column_selected = 0;
                 self.mode = Mode::Columns;
             } else {
-                self.message = Some("No project open".into());
+                self.show_error("No project open");
             }
             return None;
         }
@@ -301,7 +310,7 @@ impl App {
             }
         }
 
-        self.message = Some(format!("Not an editor command: {command}"));
+        self.show_error(format!("Not an editor command: {command}"));
         None
     }
 
@@ -411,7 +420,7 @@ impl App {
             .find(|field| &field.name == field_name)
             .cloned()
         else {
-            self.message = Some(format!("No editing metadata for {field_name}"));
+            self.show_error(format!("No editing metadata for {field_name}"));
             return;
         };
         let current = self
@@ -451,7 +460,7 @@ impl App {
                     EditableFieldKind::Number => match value.parse::<f64>() {
                         Ok(number) if number.is_finite() => FieldValue::Number(number),
                         _ => {
-                            self.message = Some("Enter a valid number".into());
+                            self.show_error("Enter a valid number");
                             return None;
                         }
                     },
@@ -459,7 +468,7 @@ impl App {
                         FieldValue::Date(value.clone())
                     }
                     EditableFieldKind::Date => {
-                        self.message = Some("Enter a date as YYYY-MM-DD".into());
+                        self.show_error("Enter a date as YYYY-MM-DD");
                         return None;
                     }
                     _ => return None,
@@ -553,6 +562,11 @@ impl App {
             self.tabs.iter().map(|tab| tab.view.clone()).collect(),
             self.active_tab,
         )
+    }
+
+    fn show_error(&mut self, error: impl Into<String>) {
+        self.message = None;
+        self.error_dialog = Some(error.into());
     }
 }
 
@@ -700,6 +714,7 @@ fn edit_target_with_progress(
     source: &dyn ProjectSource,
 ) -> Result<(), DynError> {
     app.message = Some("Opening project...".into());
+    app.error_dialog = None;
     terminal.draw(|frame| render(frame, app))?;
     edit_target(app, target, token_provider, source);
     Ok(())
@@ -723,7 +738,7 @@ fn edit_target(
                 app.state_path = Some(path.to_path_buf());
                 restore_session_state(app, state, token_provider, source);
             }
-            Err(error) => app.message = Some(error.to_string()),
+            Err(error) => app.show_error(error.to_string()),
         }
     } else {
         app.state_path = Some(path.to_path_buf());
@@ -733,7 +748,7 @@ fn edit_target(
 
 fn write_state(app: &mut App) -> bool {
     let Some(path) = &app.state_path else {
-        app.message = Some("No state path; use :e PATH first".into());
+        app.show_error("No state path; use :e PATH first");
         return false;
     };
 
@@ -743,7 +758,7 @@ fn write_state(app: &mut App) -> bool {
             true
         }
         Err(error) => {
-            app.message = Some(error.to_string());
+            app.show_error(error.to_string());
             false
         }
     }
@@ -762,7 +777,7 @@ fn update_field(
     source: &dyn ProjectSource,
 ) {
     let Some(token) = token_provider.token() else {
-        app.message = Some("No GitHub token found; set GITHUB_TOKEN or run `ghui login`".into());
+        app.show_error("No GitHub token found; set GITHUB_TOKEN or run `ghui login`");
         return;
     };
     match source.update_field(
@@ -794,7 +809,7 @@ fn update_field(
             app.mode = Mode::Active;
             app.message = Some(format!("Updated {}", update.field_name));
         }
-        Err(error) => app.message = Some(error.to_string()),
+        Err(error) => app.show_error(error.to_string()),
     }
 }
 
@@ -818,7 +833,7 @@ fn open_project(
             app.tab_mut().project = Some(project);
             app.message = None;
         }
-        Err(error) => app.message = Some(error.to_string()),
+        Err(error) => app.show_error(error.to_string()),
     }
 }
 
@@ -845,7 +860,7 @@ fn restore_session_state(
         };
         let saved_selection = app.view().selected;
         open_project(app, &url, token_provider, source);
-        if app.message.is_none() {
+        if app.error_dialog.is_none() {
             app.view_mut().selected = match (saved_selection, app.last_item_index()) {
                 (Some(selected), Some(last_index)) => Some(selected.min(last_index)),
                 _ => None,
@@ -941,6 +956,9 @@ fn render(frame: &mut Frame, app: &App) {
     if app.mode == Mode::EditField {
         render_field_editor(frame, app);
     }
+    if let Some(error) = app.error_dialog.as_deref() {
+        render_error_dialog(frame, error);
+    }
 }
 
 fn render_project(
@@ -1031,6 +1049,22 @@ fn render_field_editor(frame: &mut Frame, app: &App) {
             frame.render_stateful_widget(list, area, &mut state);
         }
     }
+}
+
+fn render_error_dialog(frame: &mut Frame, error: &str) {
+    let area = centered_rect(70, 40, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(format!("{error}\n\nEnter or Esc to dismiss"))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Red))
+                    .title(" Error "),
+            ),
+        area,
+    );
 }
 
 fn centered_rect(
@@ -1426,7 +1460,7 @@ mod tests {
         );
 
         assert_eq!(app.project().unwrap().items.len(), 1);
-        assert_eq!(app.message.as_deref(), Some("request failed"));
+        assert_eq!(app.error_dialog.as_deref(), Some("request failed"));
     }
 
     #[test]
@@ -1569,7 +1603,8 @@ mod tests {
                 *value = invalid.into();
             }
             assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
-            assert!(app.message.is_some());
+            assert!(app.error_dialog.is_some());
+            app.handle_key(key(KeyCode::Esc));
             if let Some(FieldEditor::Input { value, .. }) = app.field_editor.as_mut() {
                 *value = valid.into();
             }
@@ -1776,6 +1811,47 @@ mod tests {
     }
 
     #[test]
+    fn credential_failure_renders_in_error_dialog() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::default();
+
+        open_project(
+            &mut app,
+            "https://github.com/orgs/example/projects/1",
+            &FixedToken(None),
+            &MockProjectSource::returning(sample_project(1)),
+        );
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Error"));
+        assert!(screen.contains("no GitHub token found"));
+        assert!(screen.contains("Enter or Esc to dismiss"));
+    }
+
+    #[test]
+    fn error_dialog_blocks_input_until_dismissed() {
+        let mut app = app_with_project(sample_project(2), ViewState::new(None, Some(0)));
+        app.show_error("request failed");
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.view().selected, Some(0));
+        assert_eq!(app.error_dialog.as_deref(), Some("request failed"));
+
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.error_dialog, None);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.view().selected, Some(1));
+    }
+
+    #[test]
     fn renders_all_open_tabs_and_highlights_active_tab() {
         let backend = TestBackend::new(70, 8);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1950,7 +2026,7 @@ mod tests {
         write_state(&mut app);
 
         assert_eq!(
-            app.message.as_deref(),
+            app.error_dialog.as_deref(),
             Some("No state path; use :e PATH first")
         );
     }
@@ -1984,7 +2060,7 @@ mod tests {
 
         assert!(!app.should_quit);
         assert_eq!(
-            app.message.as_deref(),
+            app.error_dialog.as_deref(),
             Some("No state path; use :e PATH first")
         );
     }
