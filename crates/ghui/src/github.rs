@@ -146,7 +146,81 @@ query GetIssueDetails($url: URI!, $cursor: String) {
             subIssues(first: 100) { nodes { number title repository { nameWithOwner } } }
             blockedBy(first: 100) { nodes { number title repository { nameWithOwner } } }
             blocking(first: 100) { nodes { number title repository { nameWithOwner } } }
-            projectItems(first: 100) { nodes { project { title url } } }
+            projectItems(first: 20) {
+                nodes {
+                    project { title url }
+                    fieldValues(first: 100) {
+                        nodes {
+                            __typename
+                            ... on ProjectV2ItemFieldTextValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                text
+                            }
+                            ... on ProjectV2ItemFieldNumberValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                number
+                            }
+                            ... on ProjectV2ItemFieldDateValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                date
+                            }
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                name
+                            }
+                            ... on ProjectV2ItemFieldIterationValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                title
+                            }
+                            ... on ProjectV2ItemFieldMultiSelectValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                options { name }
+                            }
+                            ... on ProjectV2ItemFieldRepositoryValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                repository { nameWithOwner }
+                            }
+                            ... on ProjectV2ItemFieldLabelValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                labels(first: 20) { nodes { name } }
+                            }
+                            ... on ProjectV2ItemFieldMilestoneValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                milestone { title }
+                            }
+                            ... on ProjectV2ItemFieldPullRequestValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                pullRequests(first: 20) { nodes { number repository { nameWithOwner } } }
+                            }
+                            ... on ProjectV2ItemFieldReviewerValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                reviewers(first: 20) { nodes {
+                                    ... on Bot { displayName: login }
+                                    ... on EnterpriseTeam { displayName: name }
+                                    ... on Mannequin { displayName: login }
+                                    ... on Team { displayName: name }
+                                    ... on User { displayName: login }
+                                } }
+                            }
+                            ... on ProjectV2ItemFieldUserValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                users(first: 20) { nodes { login } }
+                            }
+                            ... on ProjectV2ItemIssueFieldValue {
+                                field { ... on ProjectV2FieldCommon { name } }
+                                issueFieldValue {
+                                    __typename
+                                    ... on IssueFieldTextValue { value }
+                                    ... on IssueFieldDateValue { value }
+                                    ... on IssueFieldNumberValue { value }
+                                    ... on IssueFieldSingleSelectValue { value }
+                                    ... on IssueFieldMultiSelectValue { value }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             comments(first: 50, after: $cursor) {
                 pageInfo { hasNextPage endCursor }
                 nodes { author { login } body createdAt }
@@ -239,7 +313,14 @@ pub(crate) struct IssueDetails {
     pub(crate) sub_issues: Vec<String>,
     pub(crate) blocked_by: Vec<String>,
     pub(crate) blocking: Vec<String>,
-    pub(crate) projects: Vec<String>,
+    pub(crate) projects: Vec<IssueProject>,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct IssueProject {
+    pub(crate) title: String,
+    pub(crate) fields: Vec<(String, String)>,
 }
 
 #[cfg(feature = "tui")]
@@ -737,8 +818,18 @@ fn decode_project(body: &str, rate_limit: Option<&RateLimit>) -> Result<DecodedP
 #[cfg(feature = "tui")]
 fn decode_issue(body: &str, rate_limit: Option<&RateLimit>) -> Result<DecodedIssuePage, DynError> {
     let response: IssueResponse = serde_json::from_str(body)?;
-    if !response.errors.is_empty() {
-        return Err(api_error(&response.errors, rate_limit));
+    let blocking_errors = response
+        .errors
+        .iter()
+        .filter(|error| !error.is_restricted_field_value())
+        .collect::<Vec<_>>();
+    if !blocking_errors.is_empty() {
+        let messages = blocking_errors
+            .into_iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(api_error_message(&messages, rate_limit));
     }
     let issue = response
         .data
@@ -775,7 +866,16 @@ fn decode_issue(body: &str, rate_limit: Option<&RateLimit>) -> Result<DecodedIss
             .nodes
             .into_iter()
             .flatten()
-            .map(|item| item.project.title)
+            .map(|item| IssueProject {
+                title: item.project.title,
+                fields: item
+                    .field_values
+                    .nodes
+                    .into_iter()
+                    .flatten()
+                    .filter_map(field_value)
+                    .collect(),
+            })
             .collect(),
     };
     Ok(DecodedIssuePage {
@@ -992,8 +1092,11 @@ struct ProjectItemConnection {
 
 #[cfg(feature = "tui")]
 #[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectItemData {
     project: ProjectSummaryData,
+    #[serde(default)]
+    field_values: FieldValuesConnection,
 }
 
 #[cfg(feature = "tui")]
@@ -2007,7 +2110,13 @@ mod tests {
                         "subIssues": { "nodes": [{ "number": 43, "title": "Child", "repository": { "nameWithOwner": "example/repo" } }] },
                         "blockedBy": { "nodes": [{ "number": 2, "title": "Blocker", "repository": { "nameWithOwner": "example/repo" } }] },
                         "blocking": { "nodes": [{ "number": 3, "title": "Blocked", "repository": { "nameWithOwner": "example/repo" } }] },
-                        "projectItems": { "nodes": [{ "project": { "title": "Roadmap", "url": "https://github.com/orgs/example/projects/1" } }] },
+                        "projectItems": { "nodes": [{
+                            "project": { "title": "Roadmap", "url": "https://github.com/orgs/example/projects/1" },
+                            "fieldValues": { "nodes": [
+                                { "__typename": "ProjectV2ItemFieldSingleSelectValue", "field": { "name": "Status" }, "name": "In progress" },
+                                { "__typename": "ProjectV2ItemFieldNumberValue", "field": { "name": "Estimate" }, "number": 5.0 }
+                            ] }
+                        }] },
                         "comments": {
                             "pageInfo": { "hasNextPage": has_next_page, "endCursor": cursor },
                             "nodes": [{ "author": { "login": "reviewer" }, "body": comment, "createdAt": "2026-09-18T10:00:00Z" }]
@@ -2039,7 +2148,15 @@ mod tests {
         assert_eq!(issue.sub_issues, ["example/repo#43 Child"]);
         assert_eq!(issue.blocked_by, ["example/repo#2 Blocker"]);
         assert_eq!(issue.blocking, ["example/repo#3 Blocked"]);
-        assert_eq!(issue.projects, ["Roadmap"]);
+        assert_eq!(issue.projects.len(), 1);
+        assert_eq!(issue.projects[0].title, "Roadmap");
+        assert_eq!(
+            issue.projects[0].fields,
+            [
+                ("Status".into(), "In progress".into()),
+                ("Estimate".into(), "5".into())
+            ]
+        );
         let requests = source.transport.requests.borrow();
         assert_eq!(
             requests[0].1["variables"]["cursor"],
@@ -2050,6 +2167,10 @@ mod tests {
             requests[0].1["variables"]["url"],
             "https://github.com/example/repo/issues/42"
         );
+        let query = requests[0].1["query"].as_str().unwrap();
+        assert!(query.contains("projectItems(first: 20)"));
+        assert!(query.contains("labels(first: 20)"));
+        assert!(!query.contains("projectItems(first: 100)"));
     }
 
     #[test]

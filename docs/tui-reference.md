@@ -58,8 +58,9 @@ fixed pane at the top of the left column. The description and complete comment
 conversation scroll beneath it, with the description and each comment displayed
 in its own bordered box. The narrower right column displays assignees, milestone,
 labels, issue type, parent and child relationships, blocking relationships, and
-project memberships. Content and metadata scroll independently; the active pane
-has a cyan border.
+project memberships. Each metadata group has its own bordered box, and project
+boxes include the issue's field values for that project. Content and metadata
+scroll independently; the active pane has a cyan border.
 
 | Shortcut | Action |
 | --- | --- |

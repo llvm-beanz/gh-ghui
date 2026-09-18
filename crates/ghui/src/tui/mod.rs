@@ -24,7 +24,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::auth;
 use crate::github::{
     emoji_status, parse_project_url, DynError, EditableField, EditableFieldKind, FieldValue,
-    GitHubProjectSource, IssueDetails, Item, Kind, Project, ProjectSource, STATUS_COLUMN,
+    GitHubProjectSource, IssueDetails, IssueProject, Item, Kind, Project, ProjectSource,
+    STATUS_COLUMN,
 };
 use crate::query::{select_items, FilterExpression, SortSpec};
 use state::{SessionState, ViewState};
@@ -1511,10 +1512,10 @@ fn render_issue_viewer(frame: &mut Frame, app: &App) {
         conversation_area,
     );
 
-    let metadata = issue_metadata(issue);
+    let metadata_width = metadata_area.width.saturating_sub(2) as usize;
+    let metadata = issue_metadata(issue, metadata_width);
     frame.render_widget(
         Paragraph::new(metadata)
-            .wrap(Wrap { trim: false })
             .scroll((app.issue_metadata_scroll, 0))
             .block(
                 Block::default()
@@ -1635,16 +1636,7 @@ fn truncate_display(text: &str, width: usize) -> String {
     result
 }
 
-fn issue_metadata(issue: &IssueDetails) -> String {
-    fn section(name: &str, values: &[String]) -> String {
-        let value = if values.is_empty() {
-            "None".into()
-        } else {
-            values.join("\n")
-        };
-        format!("{name}\n{value}")
-    }
-
+fn issue_metadata(issue: &IssueDetails, width: usize) -> String {
     let relationships = issue
         .parent
         .iter()
@@ -1663,21 +1655,59 @@ fn issue_metadata(issue: &IssueDetails) -> String {
                 .map(|item| format!("Blocking: {item}")),
         )
         .collect::<Vec<_>>();
-    [
-        section("Assignees", &issue.assignees),
-        section(
+    let mut sections = vec![
+        metadata_card("Assignees", &issue.assignees, width),
+        metadata_card(
             "Milestone",
             &issue.milestone.iter().cloned().collect::<Vec<_>>(),
+            width,
         ),
-        section("Labels", &issue.labels),
-        section(
+        metadata_card("Labels", &issue.labels, width),
+        metadata_card(
             "Type",
             &issue.issue_type.iter().cloned().collect::<Vec<_>>(),
+            width,
         ),
-        section("Relationships", &relationships),
-        section("Projects", &issue.projects),
-    ]
-    .join("\n\n")
+        metadata_card("Relationships", &relationships, width),
+    ];
+    if issue.projects.is_empty() {
+        sections.push(bordered_text("Projects", "None", width));
+    } else {
+        sections.extend(
+            issue
+                .projects
+                .iter()
+                .map(|project| project_metadata_card(project, width)),
+        );
+    }
+    sections.join("\n")
+}
+
+fn metadata_card(title: &str, values: &[String], width: usize) -> String {
+    bordered_text(
+        title,
+        if values.is_empty() {
+            "None".into()
+        } else {
+            values.join("\n")
+        }
+        .as_str(),
+        width,
+    )
+}
+
+fn project_metadata_card(project: &IssueProject, width: usize) -> String {
+    let fields = if project.fields.is_empty() {
+        "No field values.".into()
+    } else {
+        project
+            .fields
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    bordered_text(&format!("Project · {}", project.title), &fields, width)
 }
 
 fn render_project(
@@ -2109,7 +2139,13 @@ mod tests {
             sub_issues: vec!["example/repo#43 Child".into()],
             blocked_by: vec!["example/repo#2 Blocker".into()],
             blocking: vec!["example/repo#3 Blocked".into()],
-            projects: vec!["Roadmap".into()],
+            projects: vec![IssueProject {
+                title: "Roadmap".into(),
+                fields: vec![
+                    ("Status".into(), "In progress".into()),
+                    ("Priority".into(), "High".into()),
+                ],
+            }],
         }
     }
 
@@ -2635,7 +2671,9 @@ mod tests {
             "Labels",
             "Type",
             "Relationships",
-            "Projects",
+            "Project · Roadmap",
+            "Status: In progress",
+            "Priority: High",
         ] {
             assert!(screen.contains(text), "missing {text:?} in {screen}");
         }
@@ -2674,6 +2712,28 @@ mod tests {
         assert!(content
             .lines()
             .all(|line| UnicodeWidthStr::width(line) <= 24));
+    }
+
+    #[test]
+    fn issue_metadata_groups_and_project_fields_render_in_boxes() {
+        let metadata = issue_metadata(&sample_issue(), 30);
+
+        assert_eq!(metadata.matches('┌').count(), 6);
+        for title in [
+            "Assignees",
+            "Milestone",
+            "Labels",
+            "Type",
+            "Relationships",
+            "Project · Roadmap",
+        ] {
+            assert!(metadata.contains(&format!("┌─ {title}")));
+        }
+        assert!(metadata.contains("Status: In progress"));
+        assert!(metadata.contains("Priority: High"));
+        assert!(metadata
+            .lines()
+            .all(|line| UnicodeWidthStr::width(line) <= 30));
     }
 
     #[test]
