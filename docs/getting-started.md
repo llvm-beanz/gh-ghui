@@ -3,7 +3,17 @@
 ## Prerequisites
 
 - A stable Rust toolchain (e.g. via [rustup](https://rustup.rs))
-- A supported system credential store
+- [GitHub CLI](https://cli.github.com/)
+
+## Install
+
+Authenticate GitHub CLI and add the Projects write scope:
+
+```sh
+gh auth login --hostname github.com
+gh auth refresh --hostname github.com --scopes project
+gh extension install llvm-beanz/gh-ghui
+```
 
 ## Build
 
@@ -16,12 +26,13 @@ cargo build --no-default-features # build without the TUI
 ## Run
 
 ```sh
-cargo run -- --help                 # show all commands and flags
-cargo run -- login                  # login and store credentials in system credential store
-cargo run -- --verbose login        # login with diagnostic progress
-cargo run -- view <url>             # table of issues/PRs in a project
-cargo run -- tui                    # interactive TUI
+gh ghui --help                 # show all commands and flags
+gh ghui view <url>             # table of issues/PRs in a project
+gh ghui tui                    # interactive TUI
 ```
+
+For local development, replace `gh ghui` with
+`cargo run --bin gh-ghui --`.
 
 ## TUI tabs
 
@@ -38,11 +49,11 @@ list.
 
 ## Filtering and sorting
 
-Use `--filter` with `ghui view` to apply a GitHub Projects-style filter, and
+Use `--filter` with `gh ghui view` to apply a GitHub Projects-style filter, and
 `--sort` to order the matching items:
 
 ```sh
-ghui view --filter 'is:issue status:"In Progress" -label:duplicate' --sort Priority:desc URL
+gh ghui view --filter 'is:issue status:"In Progress" -label:duplicate' --sort Priority:desc URL
 ```
 
 Filters support field values, quoted values, comma-separated alternatives,
@@ -58,19 +69,21 @@ and sort settings are stored independently for each saved tab.
 
 ## Permissions
 
-Login requests the `project` and read-only `read:org` OAuth scopes. Editing
-ProjectV2 items requires `project`; displaying organization and enterprise
-team reviewers requires `read:org`. GitHub does not offer a read-only OAuth
-scope for private repositories; requesting private repository access would
-require the much broader `repo` scope, so it is intentionally not requested.
-Credentials are stored in the system keyring and cannot be supplied on the
-command line.
+ghui first uses `GH_TOKEN`, then `GITHUB_TOKEN`, then the active `github.com`
+account stored by GitHub CLI. Environment tokens must provide the same scopes.
+Run `gh auth status --hostname github.com` to inspect the active account.
 
-After upgrading from a version that requested only `read:project`, run
-`ghui login` again to grant the `project` scope required by editing commands.
+GitHub CLI's normal web login includes `repo` and `read:org`. Editing ProjectV2
+items additionally requires `project`; add it with:
 
-Organizations can restrict third-party OAuth App access independently of token
-scopes. When GitHub returns accessible project items with restricted field
-values, ghui displays the items and leaves those fields blank. A restriction
-that prevents access to the project itself is still reported as an error.
+```sh
+gh auth refresh --hostname github.com --scopes project
+```
+
+Organizations can restrict OAuth application access or require SAML SSO
+authorization. In those cases, an organization owner may need to approve the
+GitHub CLI OAuth application. When GitHub returns accessible project items with
+restricted field values, ghui displays the items and leaves those fields blank.
+A restriction that prevents access to the project itself is reported as an
+error.
 

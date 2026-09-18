@@ -21,7 +21,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::{Frame, Terminal};
 use unicode_width::UnicodeWidthStr;
 
-use crate::commands::login;
+use crate::auth;
 use crate::github::{
     emoji_status, parse_project_url, DynError, EditableField, EditableFieldKind, FieldValue,
     GitHubProjectSource, Item, Kind, Project, ProjectSource, STATUS_COLUMN,
@@ -779,17 +779,14 @@ fn valid_iso_date(value: &str) -> bool {
 }
 
 trait TokenProvider {
-    fn token(&self) -> Option<String>;
+    fn token(&self) -> Result<String, DynError>;
 }
 
 struct SystemTokenProvider;
 
 impl TokenProvider for SystemTokenProvider {
-    fn token(&self) -> Option<String> {
-        std::env::var("GITHUB_TOKEN")
-            .ok()
-            .filter(|token| !token.is_empty())
-            .or_else(|| login::get_token().ok())
+    fn token(&self) -> Result<String, DynError> {
+        auth::token()
     }
 }
 
@@ -983,9 +980,7 @@ fn refresh_project(app: &mut App, token_provider: &dyn TokenProvider, source: &d
         return;
     };
     let result = parse_project_url(&url).and_then(|project_ref| {
-        let token = token_provider
-            .token()
-            .ok_or("no GitHub token found; set GITHUB_TOKEN or run `ghui login`")?;
+        let token = token_provider.token()?;
         source.fetch_project(&project_ref, &token)
     });
     match result {
@@ -1059,9 +1054,12 @@ fn update_field(
     token_provider: &dyn TokenProvider,
     source: &dyn ProjectSource,
 ) {
-    let Some(token) = token_provider.token() else {
-        app.show_error("No GitHub token found; set GITHUB_TOKEN or run `ghui login`");
-        return;
+    let token = match token_provider.token() {
+        Ok(token) => token,
+        Err(error) => {
+            app.show_error(error.to_string());
+            return;
+        }
     };
     match source.update_field(
         &update.project_id,
@@ -1110,9 +1108,12 @@ fn remove_items(
     token_provider: &dyn TokenProvider,
     source: &dyn ProjectSource,
 ) {
-    let Some(token) = token_provider.token() else {
-        app.show_error("No GitHub token found; set GITHUB_TOKEN or run `ghui login`");
-        return;
+    let token = match token_provider.token() {
+        Ok(token) => token,
+        Err(error) => {
+            app.show_error(error.to_string());
+            return;
+        }
     };
     let total = removal.item_ids.len();
     let mut removed = 0;
@@ -1144,9 +1145,7 @@ fn open_project(
     source: &dyn ProjectSource,
 ) {
     let result = parse_project_url(url).and_then(|project_ref| {
-        let token = token_provider
-            .token()
-            .ok_or("no GitHub token found; set GITHUB_TOKEN or run `ghui login`")?;
+        let token = token_provider.token()?;
         source.fetch_project(&project_ref, &token)
     });
 
@@ -1642,8 +1641,8 @@ mod tests {
     struct FixedToken(Option<String>);
 
     impl TokenProvider for FixedToken {
-        fn token(&self) -> Option<String> {
-            self.0.clone()
+        fn token(&self) -> Result<String, DynError> {
+            self.0.clone().ok_or_else(|| "missing token".into())
         }
     }
 
@@ -2545,7 +2544,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("Error"));
-        assert!(screen.contains("no GitHub token found"));
+        assert!(screen.contains("missing token"));
         assert!(screen.contains("Enter or Esc to dismiss"));
     }
 

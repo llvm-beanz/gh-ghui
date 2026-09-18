@@ -4,10 +4,6 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "ghui", version, about, long_about = None)]
 pub struct Cli {
-    /// Increase output verbosity.
-    #[arg(short, long, global = true)]
-    pub verbose: bool,
-
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -15,9 +11,6 @@ pub struct Cli {
 /// Available subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Authenticate with GitHub and store the token.
-    Login,
-
     /// View all issues and PRs in a GitHub project as a table.
     View {
         /// URL of the GitHub project (e.g. https://github.com/orgs/hlsl-tc57/projects/1).

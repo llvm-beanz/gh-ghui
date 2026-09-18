@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use unicode_width::UnicodeWidthStr;
 
-use super::login;
+use crate::auth;
 use crate::github::{
     emoji_status, parse_project_url, DynError, GitHubProjectSource, Item, Kind, ProjectSource,
     STATUS_COLUMN,
@@ -25,17 +25,14 @@ pub fn run(url: &str, filter: Option<&str>, sort: Option<&str>) -> Result<(), Dy
 }
 
 trait TokenProvider {
-    fn token(&self) -> Option<String>;
+    fn token(&self) -> Result<String, DynError>;
 }
 
 struct SystemTokenProvider;
 
 impl TokenProvider for SystemTokenProvider {
-    fn token(&self) -> Option<String> {
-        std::env::var("GITHUB_TOKEN")
-            .ok()
-            .filter(|token| !token.is_empty())
-            .or_else(|| login::get_token().ok())
+    fn token(&self) -> Result<String, DynError> {
+        auth::token()
     }
 }
 
@@ -50,9 +47,7 @@ fn execute_view(
     let filter = filter.map(FilterExpression::parse).transpose()?;
     let sort = sort.map(SortSpec::parse).transpose()?;
     let project_ref = parse_project_url(url)?;
-    let token = token_provider
-        .token()
-        .ok_or("no GitHub token found; set GITHUB_TOKEN or run `ghui login`")?;
+    let token = token_provider.token()?;
     let project = source.fetch_project(&project_ref, &token)?;
     let items = select_items(&project.items, filter.as_ref(), sort.as_ref());
 
@@ -177,8 +172,8 @@ mod tests {
     struct FixedToken(Option<String>);
 
     impl TokenProvider for FixedToken {
-        fn token(&self) -> Option<String> {
-            self.0.clone()
+        fn token(&self) -> Result<String, DynError> {
+            self.0.clone().ok_or_else(|| "missing token".into())
         }
     }
 
@@ -250,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_view_requires_token_without_using_keychain() {
+    fn execute_view_propagates_authentication_errors() {
         let mut output = Vec::new();
         let error = execute_view(
             "https://github.com/orgs/example/projects/1",
@@ -262,7 +257,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("no GitHub token"));
+        assert_eq!(error.to_string(), "missing token");
         assert!(output.is_empty());
     }
 

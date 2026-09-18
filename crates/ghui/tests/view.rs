@@ -4,7 +4,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn ghui() -> Command {
-    Command::cargo_bin("ghui").unwrap()
+    Command::cargo_bin("gh-ghui").unwrap()
 }
 
 #[test]

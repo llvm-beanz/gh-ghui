@@ -1,6 +1,6 @@
-# ghui — workspace instructions
+# gh-ghui — workspace instructions
 
-Project: Rust Cargo workspace (resolver = "2") providing the `ghui` CLI and interactive TUI for working with GitHub projects.
+Project: Rust Cargo workspace (resolver = "2") providing the `gh ghui` GitHub CLI extension and interactive TUI for working with GitHub projects.
 
 ## Structure
 - `crates/ghui/` — main CLI crate.
@@ -15,7 +15,7 @@ Project: Rust Cargo workspace (resolver = "2") providing the `ghui` CLI and inte
 - `cargo build` — builds the CLI with the TUI enabled by default.
 - `cargo build --no-default-features` — builds without the interactive TUI.
 - `cargo test --all-features` — runs unit, integration, and doc tests for the workspace.
-- `cargo run -- <subcommand>` to run the CLI (e.g. `cargo run -- view <url>` or `cargo run -- tui`).
+- `cargo run --bin gh-ghui -- <subcommand>` to run the extension locally (e.g. `cargo run --bin gh-ghui -- view <url>` or `cargo run --bin gh-ghui -- tui`).
 
 ## Documentation
 - Keep user-facing documentation synchronized with behavior in the same change; implementation work is not complete while the relevant docs describe old commands, shortcuts, arguments, modes, persistence formats, or workflows.

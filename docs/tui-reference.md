@@ -4,7 +4,7 @@ Launch the terminal interface with an optional GitHub project URL or session-sta
 file:
 
 ```sh
-ghui tui [URL_OR_PATH]
+gh ghui tui [URL_OR_PATH]
 ```
 
 A GitHub Projects URL opens that project. An existing path loads a saved session.
@@ -54,7 +54,7 @@ available on `PATH`.
 ## Item status
 
 The generated `State` column summarizes each item's type and state. It is
-available in both `ghui view` and the TUI and can be hidden from the TUI's
+available in both `gh ghui view` and the TUI and can be hidden from the TUI's
 columns menu.
 
 | State | Emoji |

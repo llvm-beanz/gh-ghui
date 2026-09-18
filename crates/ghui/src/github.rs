@@ -387,15 +387,10 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
             });
             let response = self.transport.execute(token, &payload)?;
             if !(200..300).contains(&response.status) {
-                return Err(format!(
-                    "GitHub GraphQL request failed with HTTP {}: {}",
-                    response.status,
-                    response_snippet(&response.body)
-                )
-                .into());
+                return Err(http_error(&response));
             }
 
-            let page = decode_project(&response.body)?;
+            let page = decode_project(&response.body, response.rate_limit.as_ref())?;
             if title.is_empty() {
                 id = page.id;
                 title = page.title;
@@ -453,27 +448,14 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
         });
         let response = self.transport.execute(token, &payload)?;
         if !(200..300).contains(&response.status) {
-            return Err(format!(
-                "GitHub GraphQL request failed with HTTP {}: {}",
-                response.status,
-                response_snippet(&response.body)
-            )
-            .into());
+            return Err(http_error(&response));
         }
+        let rate_limit = response.rate_limit;
         let response: MutationResponse = serde_json::from_str(&response.body)?;
         if response.errors.is_empty() {
             Ok(())
         } else {
-            Err(format!(
-                "GitHub API error: {}",
-                response
-                    .errors
-                    .iter()
-                    .map(|error| error.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-            .into())
+            Err(api_error(&response.errors, rate_limit.as_ref()))
         }
     }
 
@@ -488,27 +470,14 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
         });
         let response = self.transport.execute(token, &payload)?;
         if !(200..300).contains(&response.status) {
-            return Err(format!(
-                "GitHub GraphQL request failed with HTTP {}: {}",
-                response.status,
-                response_snippet(&response.body)
-            )
-            .into());
+            return Err(http_error(&response));
         }
+        let rate_limit = response.rate_limit;
         let response: MutationResponse = serde_json::from_str(&response.body)?;
         if response.errors.is_empty() {
             Ok(())
         } else {
-            Err(format!(
-                "GitHub API error: {}",
-                response
-                    .errors
-                    .iter()
-                    .map(|error| error.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-            .into())
+            Err(api_error(&response.errors, rate_limit.as_ref()))
         }
     }
 }
@@ -516,6 +485,13 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
 struct GraphQlResponse {
     status: u16,
     body: String,
+    rate_limit: Option<RateLimit>,
+}
+
+struct RateLimit {
+    limit: Option<u64>,
+    remaining: Option<u64>,
+    reset: Option<u64>,
 }
 
 trait GraphQlTransport {
@@ -561,8 +537,43 @@ impl GraphQlTransport for ReqwestGraphQlTransport {
             .json(payload)
             .send()?;
         let status = response.status().as_u16();
+        let rate_limit = RateLimit::from_headers(response.headers());
         let body = response.text()?;
-        Ok(GraphQlResponse { status, body })
+        Ok(GraphQlResponse {
+            status,
+            body,
+            rate_limit,
+        })
+    }
+}
+
+impl RateLimit {
+    fn from_headers(headers: &reqwest::header::HeaderMap) -> Option<Self> {
+        fn value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+            headers.get(name)?.to_str().ok()?.parse().ok()
+        }
+
+        let rate_limit = Self {
+            limit: value(headers, "x-ratelimit-limit"),
+            remaining: value(headers, "x-ratelimit-remaining"),
+            reset: value(headers, "x-ratelimit-reset"),
+        };
+        (rate_limit.limit.is_some() || rate_limit.remaining.is_some() || rate_limit.reset.is_some())
+            .then_some(rate_limit)
+    }
+
+    fn display(&self) -> String {
+        let remaining = self
+            .remaining
+            .map_or_else(|| "unknown".into(), |value| value.to_string());
+        let limit = self
+            .limit
+            .map_or_else(|| "unknown".into(), |value| value.to_string());
+        let reset = self.reset.map_or_else(
+            || "unknown".into(),
+            |value| format!("Unix timestamp {value}"),
+        );
+        format!("rate limit {remaining}/{limit} remaining; resets at {reset}")
     }
 }
 
@@ -577,7 +588,7 @@ struct DecodedPage {
     end_cursor: Option<String>,
 }
 
-fn decode_project(body: &str) -> Result<DecodedPage, DynError> {
+fn decode_project(body: &str, rate_limit: Option<&RateLimit>) -> Result<DecodedPage, DynError> {
     let response: PageResponse = serde_json::from_str(body)?;
     let blocking_errors = response
         .errors
@@ -590,7 +601,7 @@ fn decode_project(body: &str) -> Result<DecodedPage, DynError> {
             .map(|error| error.message.as_str())
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(format!("GitHub API error: {messages}").into());
+        return Err(api_error_message(&messages, rate_limit));
     }
 
     let data = response
@@ -621,6 +632,37 @@ fn decode_project(body: &str) -> Result<DecodedPage, DynError> {
         has_next_page: project.items.page_info.has_next_page,
         end_cursor: project.items.page_info.end_cursor,
     })
+}
+
+#[cfg(feature = "tui")]
+fn api_error(errors: &[ApiError], rate_limit: Option<&RateLimit>) -> DynError {
+    let messages = errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    api_error_message(&messages, rate_limit)
+}
+
+fn api_error_message(messages: &str, rate_limit: Option<&RateLimit>) -> DynError {
+    match rate_limit {
+        Some(rate_limit) => {
+            format!("GitHub API error: {messages} ({})", rate_limit.display()).into()
+        }
+        None => format!("GitHub API error: {messages}").into(),
+    }
+}
+
+fn http_error(response: &GraphQlResponse) -> DynError {
+    let message = format!(
+        "GitHub GraphQL request failed with HTTP {}: {}",
+        response.status,
+        response_snippet(&response.body)
+    );
+    match &response.rate_limit {
+        Some(rate_limit) => format!("{message} ({})", rate_limit.display()).into(),
+        None => message.into(),
+    }
 }
 
 fn response_snippet(body: &str) -> String {
@@ -1310,6 +1352,7 @@ mod tests {
     fn project_page(number: u32, has_next_page: bool, cursor: Option<&str>) -> GraphQlResponse {
         GraphQlResponse {
             status: 200,
+            rate_limit: None,
             body: serde_json::json!({
                 "data": { "organization": { "project": {
                     "title": "Project",
@@ -1483,7 +1526,7 @@ mod tests {
             } } }
         });
 
-        let page = decode_project(&response.to_string()).unwrap();
+        let page = decode_project(&response.to_string(), None).unwrap();
 
         assert_eq!(page.title, "My Project");
         assert_eq!(
@@ -1568,7 +1611,7 @@ mod tests {
             }]
         });
 
-        let page = decode_project(&response.to_string()).unwrap();
+        let page = decode_project(&response.to_string(), None).unwrap();
 
         assert_eq!(page.title, "LLVM");
         assert_eq!(
@@ -1595,12 +1638,12 @@ mod tests {
             }]
         });
 
-        assert!(decode_project(&restricted_project.to_string())
+        assert!(decode_project(&restricted_project.to_string(), None)
             .err()
             .expect("project-level restriction should fail")
             .to_string()
             .contains("OAuth App access restrictions"));
-        assert!(decode_project(&unrelated_field_error.to_string())
+        assert!(decode_project(&unrelated_field_error.to_string(), None)
             .err()
             .expect("unrelated GraphQL error should fail")
             .to_string()
@@ -1636,6 +1679,7 @@ mod tests {
         let source = GitHubProjectSource {
             transport: FakeTransport::with_responses([GraphQlResponse {
                 status: 200,
+                rate_limit: None,
                 body: r#"{ "data": { "updateProjectV2ItemFieldValue": { "projectV2Item": { "id": "item" } } } }"#.into(),
             }]),
         };
@@ -1669,6 +1713,7 @@ mod tests {
         let source = GitHubProjectSource {
             transport: FakeTransport::with_responses([GraphQlResponse {
                 status: 200,
+                rate_limit: None,
                 body: r#"{ "data": { "deleteProjectV2Item": { "deletedItemId": "item" } } }"#
                     .into(),
             }]),
@@ -1690,15 +1735,22 @@ mod tests {
     fn reports_http_and_pagination_errors() {
         let http_error_source = GitHubProjectSource {
             transport: FakeTransport::with_responses([GraphQlResponse {
-                status: 401,
-                body: "bad credentials".into(),
+                status: 403,
+                rate_limit: Some(RateLimit {
+                    limit: Some(5000),
+                    remaining: Some(0),
+                    reset: Some(1770000000),
+                }),
+                body: "rate limit exceeded".into(),
             }]),
         };
-        assert!(http_error_source
+        let error = http_error_source
             .fetch_project(&organization_project_ref(), "invalid")
             .unwrap_err()
-            .to_string()
-            .contains("HTTP 401: bad credentials"));
+            .to_string();
+        assert!(error.contains("HTTP 403: rate limit exceeded"));
+        assert!(error.contains("0/5000 remaining"));
+        assert!(error.contains("1770000000"));
 
         let pagination_source = GitHubProjectSource {
             transport: FakeTransport::with_responses([project_page(1, true, None)]),
@@ -1719,7 +1771,11 @@ mod tests {
                 .path("/graphql")
                 .header("authorization", "Bearer secret")
                 .json_body(payload.clone());
-            then.status(200).body("response body");
+            then.status(200)
+                .header("x-ratelimit-limit", "5000")
+                .header("x-ratelimit-remaining", "42")
+                .header("x-ratelimit-reset", "1770000000")
+                .body("response body");
         });
         let transport = ReqwestGraphQlTransport::with_endpoint(server.url("/graphql")).unwrap();
 
@@ -1728,5 +1784,30 @@ mod tests {
         request.assert();
         assert_eq!(response.status, 200);
         assert_eq!(response.body, "response body");
+        assert_eq!(
+            response.rate_limit.unwrap().display(),
+            "rate limit 42/5000 remaining; resets at Unix timestamp 1770000000"
+        );
+    }
+
+    #[test]
+    fn graphql_errors_include_rate_limit_context() {
+        let response = serde_json::json!({
+            "errors": [{ "message": "API rate limit exceeded" }]
+        });
+        let rate_limit = RateLimit {
+            limit: Some(5000),
+            remaining: Some(0),
+            reset: Some(1770000000),
+        };
+
+        let error = decode_project(&response.to_string(), Some(&rate_limit))
+            .err()
+            .expect("rate limit error should fail")
+            .to_string();
+
+        assert!(error.contains("API rate limit exceeded"));
+        assert!(error.contains("0/5000 remaining"));
+        assert!(error.contains("1770000000"));
     }
 }

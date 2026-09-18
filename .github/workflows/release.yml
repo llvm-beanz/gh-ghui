@@ -1,0 +1,53 @@
+name: Release extension
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset: gh-ghui-linux-amd64
+            executable: target/release/gh-ghui
+          - runner: macos-15-intel
+            asset: gh-ghui-darwin-amd64
+            executable: target/release/gh-ghui
+          - runner: macos-15
+            asset: gh-ghui-darwin-arm64
+            executable: target/release/gh-ghui
+          - runner: windows-latest
+            asset: gh-ghui-windows-amd64.exe
+            executable: target/release/gh-ghui.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p ghui
+      - shell: bash
+        run: cp "${{ matrix.executable }}" "${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

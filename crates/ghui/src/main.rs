@@ -1,3 +1,4 @@
+mod auth;
 mod cli;
 mod commands;
 mod github;
@@ -27,7 +28,6 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match &cli.command {
-        Some(Command::Login) => commands::login::run(cli.verbose),
         Some(Command::View { url, filter, sort }) => {
             commands::view::run(url, filter.as_deref(), sort.as_deref())
         }

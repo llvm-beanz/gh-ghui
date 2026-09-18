@@ -1,36 +1,36 @@
-//! Integration tests for the `ghui` CLI.
+//! Integration tests for the `gh-ghui` extension executable.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn ghui() -> Command {
-    Command::cargo_bin("ghui").unwrap()
+    Command::cargo_bin("gh-ghui").unwrap()
 }
 
 #[test]
-fn help_lists_supported_commands_and_verbose_flag() {
-    let mut cmd = ghui();
-    cmd.arg("--help").assert().success().stdout(
-        predicate::str::contains("login")
-            .and(predicate::str::contains("--verbose"))
-            .and(predicate::str::contains("--token").not()),
-    );
+fn help_lists_supported_commands_without_custom_login() {
+    ghui()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("view"))
+        .stdout(predicate::str::contains("login").not());
 }
 
 #[cfg(feature = "tui")]
 #[test]
 fn default_features_include_tui_command() {
-    let mut cmd = ghui();
-    cmd.arg("--help")
+    ghui()
+        .arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains("tui"));
 }
 
 #[test]
-fn removed_token_option_is_rejected() {
-    let mut cmd = ghui();
-    cmd.args(["--token", "secret", "tui"])
+fn token_option_is_rejected_without_echoing_its_value() {
+    ghui()
+        .args(["--token", "secret", "view"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unexpected argument '--token'"))
@@ -39,8 +39,8 @@ fn removed_token_option_is_rejected() {
 
 #[test]
 fn unsupported_command_is_rejected() {
-    let mut cmd = ghui();
-    cmd.arg("not-a-real-command")
+    ghui()
+        .arg("not-a-real-command")
         .assert()
         .failure()
         .stderr(predicate::str::contains(

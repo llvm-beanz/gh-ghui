@@ -5,18 +5,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "gh-ghui"
+path = "src/main.rs"
+
 [features]
 default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
 clap = { workspace = true }
-keyring = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 unicode-width = { workspace = true }
-webbrowser = { workspace = true }
 crossterm = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 
@@ -25,9 +27,4 @@ assert_cmd = "2"
 httpmock = "0.8"
 predicates = "3"
 
-[target.'cfg(windows)'.dependencies]
-keyring = { workspace = true, features = ["windows-native"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
 
