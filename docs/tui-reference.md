@@ -56,7 +56,9 @@ available on `PATH`.
 The full-screen issue viewer keeps the issue title, number, and author in a
 fixed pane at the top of the left column. The description and complete comment
 conversation scroll beneath it, with the description and each comment displayed
-in its own bordered box. The narrower right column displays assignees, milestone,
+in its own bordered box. GitHub Markdown in descriptions and comments is rendered
+with terminal styles and formatting for headings, emphasis, lists, links, quotes,
+tables, and code blocks. The narrower right column displays assignees, milestone,
 labels, issue type, parent and child relationships, blocking relationships, and
 project memberships. Each metadata group has its own bordered box, and project
 boxes include the issue's field values for that project. Content and metadata

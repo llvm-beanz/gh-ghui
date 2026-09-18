@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [features]
 default = ["tui"]
-tui = ["dep:ratatui", "dep:crossterm"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:tui-markdown"]
 
 [dependencies]
 clap = { workspace = true }
@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 unicode-width = { workspace = true }
 crossterm = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
+tui-markdown = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd = "2"

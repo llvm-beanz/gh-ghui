@@ -16,7 +16,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -1543,23 +1543,23 @@ fn issue_pane_border_style(active: bool) -> Style {
     }
 }
 
-fn issue_content(issue: &IssueDetails, width: usize) -> String {
+fn issue_content(issue: &IssueDetails, width: usize) -> Text<'static> {
     let description = if issue.body.is_empty() {
         "No description."
     } else {
         &issue.body
     };
-    let mut sections = vec![bordered_text(
+    let mut lines = bordered_markdown(
         &format!("Description · {}", issue.state),
         description,
         width,
-    )];
-    sections.push("Conversation".into());
+    );
+    lines.push(Line::raw("Conversation"));
     if issue.comments.is_empty() {
-        sections.push(bordered_text("Comments", "No comments.", width));
+        lines.extend(bordered_markdown("Comments", "No comments.", width));
     } else {
-        sections.extend(issue.comments.iter().map(|comment| {
-            bordered_text(
+        for comment in &issue.comments {
+            lines.extend(bordered_markdown(
                 &format!(
                     "{} · {}",
                     comment.author.as_deref().unwrap_or("unknown"),
@@ -1567,10 +1567,58 @@ fn issue_content(issue: &IssueDetails, width: usize) -> String {
                 ),
                 &comment.body,
                 width,
-            )
-        }));
+            ));
+        }
     }
-    sections.join("\n")
+    Text::from(lines)
+}
+
+fn bordered_markdown(title: &str, body: &str, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    let inner_width = width - 4;
+    let title = truncate_display(title, width.saturating_sub(5));
+    let top_prefix = format!("┌─ {title} ");
+    let top_fill = width.saturating_sub(UnicodeWidthStr::width(top_prefix.as_str()) + 1);
+    let mut lines = vec![Line::raw(format!("{top_prefix}{}┐", "─".repeat(top_fill)))];
+    let markdown = tui_markdown::from_str(body);
+    for markdown_line in &markdown.lines {
+        for line in wrap_styled_line(markdown_line, inner_width) {
+            let padding = inner_width.saturating_sub(line.width());
+            let mut spans = vec![Span::raw("│ ")];
+            spans.extend(line.spans);
+            spans.push(Span::raw(format!("{} │", " ".repeat(padding))));
+            lines.push(Line::from(spans));
+        }
+    }
+    if markdown.lines.is_empty() {
+        lines.push(Line::raw(format!("│ {} │", " ".repeat(inner_width))));
+    }
+    lines.push(Line::raw(format!("└{}┘", "─".repeat(width - 2))));
+    lines
+}
+
+fn wrap_styled_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::default()];
+    }
+    let mut lines = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut line_width = 0;
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme.symbol);
+        if line_width + grapheme_width > width && line_width > 0 {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            line_width = 0;
+        }
+        if let Some(span) = spans.last_mut().filter(|span| span.style == grapheme.style) {
+            span.content.to_mut().push_str(grapheme.symbol);
+        } else {
+            spans.push(Span::styled(grapheme.symbol.to_owned(), grapheme.style));
+        }
+        line_width += grapheme_width;
+    }
+    lines.push(Line::from(spans));
+    lines
 }
 
 fn bordered_text(title: &str, body: &str, width: usize) -> String {
@@ -2696,7 +2744,7 @@ mod tests {
     #[test]
     fn issue_content_boxes_wrap_to_the_available_width() {
         let mut issue = sample_issue();
-        issue.body = "A description that must wrap across several narrow lines.".into();
+        issue.body = "A **description** that must wrap across several narrow lines.".into();
         issue.comments.push(IssueComment {
             author: Some("reviewer".into()),
             body: "Another comment".into(),
@@ -2704,14 +2752,20 @@ mod tests {
         });
 
         let content = issue_content(&issue, 24);
+        let text = content.to_string();
 
-        assert_eq!(content.matches('┌').count(), 3);
-        assert!(content.contains("┌─ Description · OPEN"));
-        assert!(content.contains("┌─ hubot · 2026-09-"));
-        assert!(content.contains("┌─ reviewer · 2026-"));
+        assert_eq!(text.matches('┌').count(), 3);
+        assert!(text.contains("┌─ Description · OPEN"));
+        assert!(text.contains("┌─ hubot · 2026-09-"));
+        assert!(text.contains("┌─ reviewer · 2026-"));
+        assert!(content.lines.iter().all(|line| line.width() <= 24));
         assert!(content
-            .lines()
-            .all(|line| UnicodeWidthStr::width(line) <= 24));
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| {
+                span.content.contains("description") && span.style.add_modifier == Modifier::BOLD
+            }));
     }
 
     #[test]

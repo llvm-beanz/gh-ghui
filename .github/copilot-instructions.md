@@ -37,7 +37,7 @@ Project: Rust Cargo workspace (resolver = "2") providing the `gh ghui` GitHub CL
 
 ## Conventions
 - New non-interactive commands: add a module in `crates/ghui/src/commands/` exporting `pub fn run(...) -> Result<(), Box<dyn Error>>`, add the variant in `src/cli.rs`, and dispatch in `src/main.rs`.
-- TUI code must stay feature-gated (`#[cfg(feature = "tui")]`); only `ratatui` and `crossterm` (declared as workspace dependencies) may be used there.
+- TUI code must stay feature-gated (`#[cfg(feature = "tui")]`); `ratatui`, `crossterm`, and `tui-markdown` are declared as workspace dependencies for it.
 - Add new dependencies to `workspace.dependencies` in the root `Cargo.toml` and reference them from crate manifests.
 - `Cargo.lock` is intentionally committed (binary workspace) — do not ignore it.
 - Keep user-facing docs in `docs/`; avoid duplicating the full TUI reference in `README.md`.
