@@ -58,13 +58,16 @@ and sort settings are stored independently for each saved tab.
 
 ## Permissions
 
-Login requests the read-only `read:project` and `read:org` OAuth scopes.
-Project access requires `read:project`; displaying organization and enterprise
+Login requests the `project` and read-only `read:org` OAuth scopes. Editing
+ProjectV2 items requires `project`; displaying organization and enterprise
 team reviewers requires `read:org`. GitHub does not offer a read-only OAuth
 scope for private repositories; requesting private repository access would
 require the much broader `repo` scope, so it is intentionally not requested.
 Credentials are stored in the system keyring and cannot be supplied on the
 command line.
+
+After upgrading from a version that requested only `read:project`, run
+`ghui login` again to grant the `project` scope required by editing commands.
 
 Organizations can restrict third-party OAuth App access independently of token
 scopes. When GitHub returns accessible project items with restricted field

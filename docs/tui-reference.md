@@ -151,6 +151,8 @@ Press `:` in normal mode, type a command without the leading colon, and press
 | `:wq` | Save and quit; remain open if saving fails |
 | `:e URL` | Open a GitHub project in the active tab |
 | `:e PATH` | Load a session from an existing path, or configure a missing path for future saves |
+| `:d` | Remove the selected item from the project |
+| `:dCOUNT` | Remove the selected item and following visible items, up to `COUNT` total |
 | `:columns` | Open the columns menu for the active tab |
 | `:refresh` | Refresh the active tab's project from GitHub |
 | `:legend` or `:emoji` | Open the item status emoji legend |
@@ -163,6 +165,10 @@ Press `:` in normal mode, type a command without the leading colon, and press
 | `:tabnext` or `:tabn` | Switch to the next tab |
 | `:tabprevious` or `:tabp` | Switch to the previous tab |
 | `:tabclose` or `:tabc` | Close the active tab |
+
+With an active filter or sort, `:dCOUNT` follows the visible row order.
+Removing an item affects only the project; it does not delete the underlying
+issue or pull request.
 
 Closing the only tab resets it to an empty tab rather than closing the TUI.
 

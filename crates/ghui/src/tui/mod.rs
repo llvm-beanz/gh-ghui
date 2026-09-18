@@ -111,6 +111,12 @@ struct FieldUpdate {
     display_value: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RemoveItems {
+    project_id: String,
+    item_ids: Vec<String>,
+}
+
 #[derive(Debug, PartialEq)]
 enum Action {
     Edit(String),
@@ -118,6 +124,7 @@ enum Action {
     Write,
     WriteQuit,
     UpdateField(FieldUpdate),
+    RemoveItems(RemoveItems),
     NewTab(Option<String>),
     CloseTab,
     NextTab,
@@ -191,6 +198,22 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    fn remove_items_action(&self, count: usize) -> Option<Action> {
+        let project_id = self.project()?.id.clone();
+        let selected = self.view().selected?;
+        let item_ids = self
+            .visible_items()
+            .into_iter()
+            .skip(selected)
+            .take(count)
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        (!item_ids.is_empty()).then_some(Action::RemoveItems(RemoveItems {
+            project_id,
+            item_ids,
+        }))
     }
 
     fn handle_command_key(&mut self, key: KeyCode) -> Option<Action> {
@@ -306,6 +329,21 @@ impl App {
         self.mode = Mode::Normal;
 
         self.history_dirty |= history::record(&mut self.command_history, command.clone());
+
+        if let Some(count) = command.strip_prefix('d') {
+            let count = if count.is_empty() {
+                Some(1)
+            } else {
+                count.parse::<usize>().ok().filter(|count| *count > 0)
+            };
+            return match count {
+                Some(count) => self.remove_items_action(count),
+                None => {
+                    self.show_error(format!("Invalid delete command: {command}"));
+                    None
+                }
+            };
+        }
 
         if command == "q" {
             self.should_quit = true;
@@ -830,6 +868,9 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
                 Some(Action::UpdateField(update)) => {
                     update_field(&mut app, update, &token_provider, &source);
                 }
+                Some(Action::RemoveItems(removal)) => {
+                    remove_items(&mut app, removal, &token_provider, &source);
+                }
                 Some(Action::NewTab(target)) => {
                     app.new_tab(target.is_none());
                     if let Some(target) = target {
@@ -1016,6 +1057,39 @@ fn update_field(
         }
         Err(error) => app.show_error(error.to_string()),
     }
+}
+
+fn remove_items(
+    app: &mut App,
+    removal: RemoveItems,
+    token_provider: &dyn TokenProvider,
+    source: &dyn ProjectSource,
+) {
+    let Some(token) = token_provider.token() else {
+        app.show_error("No GitHub token found; set GITHUB_TOKEN or run `ghui login`");
+        return;
+    };
+    let total = removal.item_ids.len();
+    let mut removed = 0;
+    for item_id in removal.item_ids {
+        if let Err(error) = source.remove_item(&removal.project_id, &item_id, &token) {
+            app.show_error(format!("Removed {removed} of {total} items: {error}"));
+            return;
+        }
+        if let Some(project) = app.project_mut() {
+            project.items.retain(|item| item.id != item_id);
+        }
+        removed += 1;
+    }
+    app.view_mut().selected = match (app.view().selected, app.last_item_index()) {
+        (Some(selected), Some(last_index)) => Some(selected.min(last_index)),
+        _ => None,
+    };
+    app.message = Some(if removed == 1 {
+        "Removed 1 item from project".into()
+    } else {
+        format!("Removed {removed} items from project")
+    });
 }
 
 fn open_project(
@@ -1929,6 +2003,105 @@ mod tests {
         app.handle_key(key(KeyCode::Char('G')));
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(app.view().selected, Some(19));
+    }
+
+    #[test]
+    fn delete_command_selects_visible_items_with_optional_count() {
+        let mut app = app_with_project(sample_project(5), ViewState::new(None, Some(1)));
+
+        let action = type_command(&mut app, "d");
+        assert_eq!(
+            action,
+            Some(Action::RemoveItems(RemoveItems {
+                project_id: "project-id".into(),
+                item_ids: vec!["item-1".into()],
+            }))
+        );
+
+        let action = type_command(&mut app, "d4");
+        assert_eq!(
+            action,
+            Some(Action::RemoveItems(RemoveItems {
+                project_id: "project-id".into(),
+                item_ids: vec![
+                    "item-1".into(),
+                    "item-2".into(),
+                    "item-3".into(),
+                    "item-4".into(),
+                ],
+            }))
+        );
+
+        assert_eq!(type_command(&mut app, "d0"), None);
+        assert_eq!(
+            app.error_dialog.as_deref(),
+            Some("Invalid delete command: d0")
+        );
+        app.error_dialog = None;
+        assert_eq!(type_command(&mut app, "dabc"), None);
+        assert_eq!(
+            app.error_dialog.as_deref(),
+            Some("Invalid delete command: dabc")
+        );
+    }
+
+    #[test]
+    fn delete_count_uses_filtered_sorted_order_and_clamps_at_end() {
+        let mut view = ViewState::new(None, Some(0));
+        view.filter = Some("title:Issue*".into());
+        view.sort = Some("Title:desc".into());
+        let mut app = app_with_project(sample_project(3), view);
+
+        assert_eq!(
+            type_command(&mut app, "d9"),
+            Some(Action::RemoveItems(RemoveItems {
+                project_id: "project-id".into(),
+                item_ids: vec!["item-2".into(), "item-1".into(), "item-0".into()],
+            }))
+        );
+    }
+
+    #[test]
+    fn remove_items_updates_source_project_and_selection() {
+        let mut app = app_with_project(sample_project(4), ViewState::new(None, Some(2)));
+        let source = MockProjectSource::returning(sample_project(0));
+
+        remove_items(
+            &mut app,
+            RemoveItems {
+                project_id: "project-id".into(),
+                item_ids: vec!["item-2".into(), "item-3".into()],
+            },
+            &FixedToken(Some("token".into())),
+            &source,
+        );
+
+        assert_eq!(
+            source.removals(),
+            [
+                crate::github::testing::RemoveRequest {
+                    project_id: "project-id".into(),
+                    item_id: "item-2".into(),
+                    token: "token".into(),
+                },
+                crate::github::testing::RemoveRequest {
+                    project_id: "project-id".into(),
+                    item_id: "item-3".into(),
+                    token: "token".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            app.project()
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["item-0", "item-1"]
+        );
+        assert_eq!(app.view().selected, Some(1));
+        assert_eq!(app.message.as_deref(), Some("Removed 2 items from project"));
     }
 
     #[test]

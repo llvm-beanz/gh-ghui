@@ -144,6 +144,15 @@ mutation UpdateProjectItemField(
 }
 "#;
 
+#[cfg(feature = "tui")]
+const DELETE_ITEM_MUTATION: &str = r#"
+mutation DeleteProjectItem($projectId: ID!, $itemId: ID!) {
+    deleteProjectV2Item(input: { projectId: $projectId, itemId: $itemId }) {
+        deletedItemId
+    }
+}
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectRef {
     owner: String,
@@ -304,6 +313,8 @@ pub(crate) trait ProjectSource {
         value: FieldValue,
         token: &str,
     ) -> Result<(), DynError>;
+    #[cfg(feature = "tui")]
+    fn remove_item(&self, project_id: &str, item_id: &str, token: &str) -> Result<(), DynError>;
 }
 
 pub(crate) fn parse_project_url(input: &str) -> Result<ProjectRef, DynError> {
@@ -438,6 +449,41 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
                 "itemId": item_id,
                 "fieldId": field_id,
                 "value": value,
+            },
+        });
+        let response = self.transport.execute(token, &payload)?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!(
+                "GitHub GraphQL request failed with HTTP {}: {}",
+                response.status,
+                response_snippet(&response.body)
+            )
+            .into());
+        }
+        let response: MutationResponse = serde_json::from_str(&response.body)?;
+        if response.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "GitHub API error: {}",
+                response
+                    .errors
+                    .iter()
+                    .map(|error| error.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+            .into())
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    fn remove_item(&self, project_id: &str, item_id: &str, token: &str) -> Result<(), DynError> {
+        let payload = serde_json::json!({
+            "query": DELETE_ITEM_MUTATION,
+            "variables": {
+                "projectId": project_id,
+                "itemId": item_id,
             },
         });
         let response = self.transport.execute(token, &payload)?;
@@ -1118,11 +1164,21 @@ pub(crate) mod testing {
         pub(crate) token: String,
     }
 
+    #[cfg(feature = "tui")]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct RemoveRequest {
+        pub(crate) project_id: String,
+        pub(crate) item_id: String,
+        pub(crate) token: String,
+    }
+
     pub(crate) struct MockProjectSource {
         result: Result<Project, String>,
         requests: RefCell<Vec<(ProjectRef, String)>>,
         #[cfg(feature = "tui")]
         updates: RefCell<Vec<UpdateRequest>>,
+        #[cfg(feature = "tui")]
+        removals: RefCell<Vec<RemoveRequest>>,
     }
 
     impl MockProjectSource {
@@ -1132,6 +1188,8 @@ pub(crate) mod testing {
                 requests: RefCell::default(),
                 #[cfg(feature = "tui")]
                 updates: RefCell::default(),
+                #[cfg(feature = "tui")]
+                removals: RefCell::default(),
             }
         }
 
@@ -1141,6 +1199,8 @@ pub(crate) mod testing {
                 requests: RefCell::default(),
                 #[cfg(feature = "tui")]
                 updates: RefCell::default(),
+                #[cfg(feature = "tui")]
+                removals: RefCell::default(),
             }
         }
 
@@ -1151,6 +1211,11 @@ pub(crate) mod testing {
         #[cfg(feature = "tui")]
         pub(crate) fn updates(&self) -> Vec<UpdateRequest> {
             self.updates.borrow().clone()
+        }
+
+        #[cfg(feature = "tui")]
+        pub(crate) fn removals(&self) -> Vec<RemoveRequest> {
+            self.removals.borrow().clone()
         }
     }
 
@@ -1180,6 +1245,21 @@ pub(crate) mod testing {
                 item_id: item_id.into(),
                 field_id: field_id.into(),
                 value,
+                token: token.into(),
+            });
+            Ok(())
+        }
+
+        #[cfg(feature = "tui")]
+        fn remove_item(
+            &self,
+            project_id: &str,
+            item_id: &str,
+            token: &str,
+        ) -> Result<(), DynError> {
+            self.removals.borrow_mut().push(RemoveRequest {
+                project_id: project_id.into(),
+                item_id: item_id.into(),
                 token: token.into(),
             });
             Ok(())
@@ -1582,6 +1662,28 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("updateProjectV2ItemFieldValue"));
+    }
+
+    #[test]
+    fn removes_item_from_project() {
+        let source = GitHubProjectSource {
+            transport: FakeTransport::with_responses([GraphQlResponse {
+                status: 200,
+                body: r#"{ "data": { "deleteProjectV2Item": { "deletedItemId": "item" } } }"#
+                    .into(),
+            }]),
+        };
+
+        source.remove_item("project", "item", "secret").unwrap();
+
+        let requests = source.transport.requests.borrow();
+        assert_eq!(requests[0].0, "secret");
+        assert_eq!(requests[0].1["variables"]["projectId"], "project");
+        assert_eq!(requests[0].1["variables"]["itemId"], "item");
+        assert!(requests[0].1["query"]
+            .as_str()
+            .unwrap()
+            .contains("deleteProjectV2Item"));
     }
 
     #[test]

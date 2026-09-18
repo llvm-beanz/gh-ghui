@@ -32,8 +32,8 @@ cargo run -- tui
 ```
 
 Use `--verbose` for diagnostic progress while logging in. Login requests the
-read-only `read:project` and `read:org` scopes. Project access requires
-`read:project`; displaying organization and enterprise team reviewers requires
+`project` and read-only `read:org` scopes. Editing ProjectV2 items requires
+`project`; displaying organization and enterprise team reviewers requires
 `read:org`. GitHub does not provide a read-only OAuth scope for private
 repositories, so private repository data may remain unavailable without the
 broad `repo` scope.
