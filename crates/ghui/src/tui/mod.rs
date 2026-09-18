@@ -41,6 +41,7 @@ struct RuntimeTab {
 struct App {
     mode: Mode,
     command: String,
+    command_cursor: usize,
     command_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -62,6 +63,7 @@ impl Default for App {
         Self {
             mode: Mode::default(),
             command: String::new(),
+            command_cursor: 0,
             command_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -184,6 +186,7 @@ impl App {
         match key {
             KeyCode::Char(':') => {
                 self.command.clear();
+                self.command_cursor = 0;
                 self.history_index = None;
                 self.history_draft.clear();
                 self.message = None;
@@ -231,6 +234,7 @@ impl App {
         match key {
             KeyCode::Esc => {
                 self.command.clear();
+                self.command_cursor = 0;
                 self.history_index = None;
                 self.history_draft.clear();
                 self.mode = Mode::Normal;
@@ -239,7 +243,46 @@ impl App {
             KeyCode::Enter => self.execute_command(),
             KeyCode::Backspace => {
                 self.detach_history();
-                self.command.pop();
+                if let Some(previous) = self.command[..self.command_cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(index, _)| index)
+                {
+                    self.command.drain(previous..self.command_cursor);
+                    self.command_cursor = previous;
+                }
+                None
+            }
+            KeyCode::Delete => {
+                self.detach_history();
+                if let Some(character) = self.command[self.command_cursor..].chars().next() {
+                    let next = self.command_cursor + character.len_utf8();
+                    self.command.drain(self.command_cursor..next);
+                }
+                None
+            }
+            KeyCode::Left => {
+                if let Some(previous) = self.command[..self.command_cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(index, _)| index)
+                {
+                    self.command_cursor = previous;
+                }
+                None
+            }
+            KeyCode::Right => {
+                if let Some(character) = self.command[self.command_cursor..].chars().next() {
+                    self.command_cursor += character.len_utf8();
+                }
+                None
+            }
+            KeyCode::Home => {
+                self.command_cursor = 0;
+                None
+            }
+            KeyCode::End => {
+                self.command_cursor = self.command.len();
                 None
             }
             KeyCode::Up => {
@@ -252,7 +295,8 @@ impl App {
             }
             KeyCode::Char(character) => {
                 self.detach_history();
-                self.command.push(character);
+                self.command.insert(self.command_cursor, character);
+                self.command_cursor += character.len_utf8();
                 None
             }
             _ => None,
@@ -335,6 +379,7 @@ impl App {
     fn execute_command(&mut self) -> Option<Action> {
         let command = self.command.trim().to_string();
         self.command.clear();
+        self.command_cursor = 0;
         self.history_index = None;
         self.history_draft.clear();
         self.mode = Mode::Normal;
@@ -473,6 +518,7 @@ impl App {
         };
         self.history_index = Some(index);
         self.command.clone_from(&self.command_history[index]);
+        self.command_cursor = self.command.len();
     }
 
     fn next_command(&mut self) {
@@ -483,9 +529,11 @@ impl App {
             let index = index + 1;
             self.history_index = Some(index);
             self.command.clone_from(&self.command_history[index]);
+            self.command_cursor = self.command.len();
         } else {
             self.history_index = None;
             self.command.clone_from(&self.history_draft);
+            self.command_cursor = self.command.len();
         }
     }
 
@@ -1267,7 +1315,8 @@ fn render(frame: &mut Frame, app: &App) {
     );
 
     if app.mode == Mode::Command {
-        let cursor_x = status_content_area.x + 1 + app.command.chars().count() as u16;
+        let cursor_width = UnicodeWidthStr::width(&app.command[..app.command_cursor]) as u16;
+        let cursor_x = status_content_area.x + 1 + cursor_width;
         frame.set_cursor_position((
             cursor_x.min(status_content_area.right().saturating_sub(1)),
             status_content_area.y,
@@ -1788,6 +1837,44 @@ mod tests {
         assert_eq!(app.command, "q");
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.command, "q");
+        assert_eq!(app.command_cursor, app.command.len());
+    }
+
+    #[test]
+    fn command_cursor_edits_at_the_insertion_position() {
+        let mut app = App::default();
+        app.handle_key(key(KeyCode::Char(':')));
+        for character in "filer".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+
+        for _ in 0..2 {
+            app.handle_key(key(KeyCode::Left));
+        }
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(app.command, "filter");
+
+        app.handle_key(key(KeyCode::Home));
+        app.handle_key(key(KeyCode::Delete));
+        assert_eq!(app.command, "ilter");
+        app.handle_key(key(KeyCode::End));
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.command, "ilte");
+    }
+
+    #[test]
+    fn command_cursor_moves_across_unicode_boundaries() {
+        let mut app = App::default();
+        app.handle_key(key(KeyCode::Char(':')));
+        for character in "a界b".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(app.command, "ax界b");
+        assert!(app.command.is_char_boundary(app.command_cursor));
     }
 
     #[test]
@@ -2500,6 +2587,7 @@ mod tests {
         let app = App {
             mode: Mode::Command,
             command: "q".into(),
+            command_cursor: 1,
             tabs: vec![RuntimeTab {
                 project: Some(sample_project(2)),
                 view: ViewState::default(),

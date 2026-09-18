@@ -145,7 +145,9 @@ Press `:` in normal mode, type a command without the leading colon, and press
 | --- | --- |
 | `Up` | Recall the previous command |
 | `Down` | Recall the next command, or restore the command being typed |
-| `Backspace` | Delete the last character |
+| `Left` or `Right` | Move the insertion cursor |
+| `Home` or `End` | Move to the start or end of the command |
+| `Backspace` or `Delete` | Delete before or at the insertion cursor |
 | `Enter` | Execute the command |
 | `Escape` | Cancel command entry |
 
