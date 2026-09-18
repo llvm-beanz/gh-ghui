@@ -137,7 +137,7 @@ enum Action {
 
 impl App {
     fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
-        if key.kind != KeyEventKind::Press {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return None;
         }
 
@@ -1875,6 +1875,23 @@ mod tests {
         app.handle_key(key(KeyCode::Char('x')));
         assert_eq!(app.command, "ax界b");
         assert!(app.command.is_char_boundary(app.command_cursor));
+    }
+
+    #[test]
+    fn command_cursor_handles_repeated_arrow_events() {
+        let mut app = App::default();
+        app.handle_key(key(KeyCode::Char(':')));
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Char('b')));
+
+        app.handle_key(KeyEvent::new_with_kind(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        app.handle_key(key(KeyCode::Char('x')));
+
+        assert_eq!(app.command, "axb");
     }
 
     #[test]
