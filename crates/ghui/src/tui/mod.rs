@@ -3,6 +3,7 @@
 mod history;
 pub mod state;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,7 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 struct RuntimeTab {
     project: Option<Project>,
     view: ViewState,
+    list_offset: Cell<usize>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1336,6 +1338,7 @@ fn restore_session_state(
         .map(|view| RuntimeTab {
             project: None,
             view,
+            list_offset: Cell::new(0),
         })
         .collect();
     app.active_tab = active_tab.min(app.tabs.len() - 1);
@@ -1400,11 +1403,10 @@ fn render(frame: &mut Frame, app: &App) {
             content_area,
             project,
             app.view(),
-            app.view().selected,
-            app.view().columns.as_deref(),
             (app.mode == Mode::Active)
                 .then_some(app.active_column.as_deref())
                 .flatten(),
+            &app.tab().list_offset,
         ),
         None => frame.render_widget(
             Paragraph::new("No project open")
@@ -1763,10 +1765,10 @@ fn render_project(
     area: ratatui::layout::Rect,
     project: &Project,
     view: &ViewState,
-    selected: Option<usize>,
-    enabled_columns: Option<&[String]>,
     active_column: Option<&str>,
+    list_offset: &Cell<usize>,
 ) {
+    let selected = view.selected;
     let items = select_view_items(project, view);
     let block = Block::default().borders(Borders::ALL).title(format!(
         " {} - {} of {} items ",
@@ -1779,14 +1781,23 @@ fn render_project(
 
     let [header_area, rows_area] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
-    let table = project_table(project, &items, enabled_columns, selected, active_column);
+    let table = project_table(
+        project,
+        &items,
+        view.columns.as_deref(),
+        selected,
+        active_column,
+    );
     frame.render_widget(Paragraph::new(table.header), header_area);
     let mut rows = List::new(table.rows);
     if active_column.is_none() {
         rows = rows.highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
     }
-    let mut state = ListState::default().with_selected(selected);
+    let mut state = ListState::default()
+        .with_selected(selected)
+        .with_offset(list_offset.get());
     frame.render_stateful_widget(rows, rows_area, &mut state);
+    list_offset.set(state.offset());
 }
 
 fn render_columns(frame: &mut Frame, app: &App) {
@@ -2210,6 +2221,7 @@ mod tests {
             tabs: vec![RuntimeTab {
                 project: Some(project),
                 view,
+                list_offset: Cell::new(0),
             }],
             ..Default::default()
         }
@@ -2471,10 +2483,12 @@ mod tests {
                 RuntimeTab {
                     project: Some(first_project),
                     view: ViewState::default(),
+                    list_offset: Cell::new(0),
                 },
                 RuntimeTab {
                     project: Some(stale_project),
                     view: active_view,
+                    list_offset: Cell::new(0),
                 },
             ],
             active_tab: 1,
@@ -2986,6 +3000,7 @@ mod tests {
             tabs: vec![RuntimeTab {
                 project: Some(sample_project(1)),
                 view: ViewState::new(None, Some(0)),
+                list_offset: Cell::new(0),
             }],
             mode: Mode::Active,
             active_column: Some("Status".into()),
@@ -3029,6 +3044,7 @@ mod tests {
                 tabs: vec![RuntimeTab {
                     project: Some(project),
                     view: ViewState::new(None, Some(0)),
+                    list_offset: Cell::new(0),
                 }],
                 mode: Mode::Active,
                 active_column: Some(name.into()),
@@ -3070,6 +3086,7 @@ mod tests {
             tabs: vec![RuntimeTab {
                 project: Some(project),
                 view: ViewState::new(None, Some(0)),
+                list_offset: Cell::new(0),
             }],
             mode: Mode::Active,
             active_column: Some("Notes".into()),
@@ -3095,6 +3112,7 @@ mod tests {
             tabs: vec![RuntimeTab {
                 project: Some(project),
                 view: ViewState::new(None, Some(0)),
+                list_offset: Cell::new(0),
             }],
             mode: Mode::Active,
             active_column: Some("Status".into()),
@@ -3126,6 +3144,7 @@ mod tests {
             tabs: vec![RuntimeTab {
                 project: Some(sample_project(2)),
                 view: ViewState::new(None, Some(0)),
+                list_offset: Cell::new(0),
             }],
             ..Default::default()
         };
@@ -3195,6 +3214,7 @@ mod tests {
                     columns: Some(vec!["Title".into()]),
                     ..Default::default()
                 },
+                list_offset: Cell::new(0),
             }],
             ..Default::default()
         };
@@ -3237,6 +3257,7 @@ mod tests {
             tabs: vec![RuntimeTab {
                 project: Some(sample_project(2)),
                 view: ViewState::default(),
+                list_offset: Cell::new(0),
             }],
             ..Default::default()
         };
@@ -3308,10 +3329,12 @@ mod tests {
                 RuntimeTab {
                     project: Some(sample_project(1)),
                     view: ViewState::default(),
+                    list_offset: Cell::new(0),
                 },
                 RuntimeTab {
                     project: Some(second_project),
                     view: ViewState::default(),
+                    list_offset: Cell::new(0),
                 },
             ],
             active_tab: 1,
@@ -3363,6 +3386,25 @@ mod tests {
             })
             .unwrap();
         assert!(selected_row.iter().any(|cell| cell.bg == Color::Cyan));
+    }
+
+    #[test]
+    fn project_viewport_scrolls_only_when_selection_leaves_visible_rows() {
+        let backend = TestBackend::new(50, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_with_project(sample_project(10), ViewState::new(None, Some(0)));
+
+        app.move_selection(5);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert_eq!(app.tab().list_offset.get(), 4);
+
+        app.move_selection(-1);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert_eq!(app.tab().list_offset.get(), 4);
+
+        app.move_selection(-1);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert_eq!(app.tab().list_offset.get(), 3);
     }
 
     #[test]
