@@ -6,6 +6,7 @@ pub mod state;
 use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -120,6 +121,7 @@ struct RemoveItems {
 #[derive(Debug, PartialEq)]
 enum Action {
     Edit(String),
+    OpenPullRequest(String),
     Refresh,
     Write,
     WriteQuit,
@@ -188,6 +190,7 @@ impl App {
                 self.mode = Mode::Command;
             }
             KeyCode::Char('?') => self.legend_dialog = true,
+            KeyCode::Char(' ') => return self.open_pull_request_action(),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::PageDown => self.move_selection(10),
@@ -198,6 +201,14 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    fn open_pull_request_action(&self) -> Option<Action> {
+        let content = self.selected_item()?.content.as_ref()?;
+        (content.kind == Kind::PullRequest)
+            .then(|| content.url.clone())
+            .flatten()
+            .map(Action::OpenPullRequest)
     }
 
     fn remove_items_action(&self, count: usize) -> Option<Action> {
@@ -805,6 +816,20 @@ impl TerminalSession {
             }
         }
     }
+
+    fn suspend(&mut self) -> Result<(), DynError> {
+        disable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), DynError> {
+        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+        enable_raw_mode()?;
+        self.terminal.clear()?;
+        Ok(())
+    }
 }
 
 impl Drop for TerminalSession {
@@ -853,6 +878,9 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
                     &token_provider,
                     &source,
                 )?,
+                Some(Action::OpenPullRequest(url)) => {
+                    open_pull_request_in_tuicr(&mut session, &mut app, &url)?;
+                }
                 Some(Action::Refresh) => refresh_project_with_progress(
                     &mut session.terminal,
                     &mut app,
@@ -891,6 +919,23 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
         }
     }
 
+    Ok(())
+}
+
+fn open_pull_request_in_tuicr(
+    session: &mut TerminalSession,
+    app: &mut App,
+    url: &str,
+) -> Result<(), DynError> {
+    session.suspend()?;
+    let result = Command::new("tuicr").args(["pr", url]).status();
+    session.resume()?;
+
+    match result {
+        Ok(status) if status.success() => app.message = Some("Returned from tuicr".into()),
+        Ok(status) => app.show_error(format!("tuicr exited with status {status}")),
+        Err(error) => app.show_error(format!("Could not launch tuicr: {error}")),
+    }
     Ok(())
 }
 
@@ -2003,6 +2048,40 @@ mod tests {
         app.handle_key(key(KeyCode::Char('G')));
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(app.view().selected, Some(19));
+    }
+
+    #[test]
+    fn space_opens_only_a_selected_pull_request_with_a_url() {
+        let mut project = sample_project(1);
+        let content = project.items[0].content.as_mut().unwrap();
+        content.kind = Kind::PullRequest;
+        content.url = Some("https://github.com/example/repo/pull/42".into());
+        let mut app = app_with_project(project, ViewState::new(None, Some(0)));
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char(' '))),
+            Some(Action::OpenPullRequest(
+                "https://github.com/example/repo/pull/42".into()
+            ))
+        );
+
+        app.project_mut().unwrap().items[0]
+            .content
+            .as_mut()
+            .unwrap()
+            .kind = Kind::Issue;
+        assert_eq!(app.handle_key(key(KeyCode::Char(' '))), None);
+
+        let content = app.project_mut().unwrap().items[0]
+            .content
+            .as_mut()
+            .unwrap();
+        content.kind = Kind::PullRequest;
+        content.url = None;
+        assert_eq!(app.handle_key(key(KeyCode::Char(' '))), None);
+
+        app.view_mut().selected = None;
+        assert_eq!(app.handle_key(key(KeyCode::Char(' '))), None);
     }
 
     #[test]

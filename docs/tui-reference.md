@@ -43,8 +43,13 @@ Normal mode navigates project items and enters other modes.
 | `g` or `Home` | Select the first item |
 | `G` or `End` | Select the last item |
 | `Enter` | Activate the selected row and its first visible editable field |
+| `Space` | Open the selected pull request in `tuicr` |
 | `?` | Open the item status emoji legend |
 | `:` | Enter command mode |
+
+Opening a pull request temporarily leaves `ghui` while `tuicr` runs. Exiting
+`tuicr` returns to the current project view. The `tuicr` executable must be
+available on `PATH`.
 
 ## Item status
 
