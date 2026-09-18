@@ -128,6 +128,35 @@ fragment ProjectFields on ProjectV2 {
 "#;
 
 #[cfg(feature = "tui")]
+const ISSUE_DETAILS_QUERY: &str = r#"
+query GetIssueDetails($url: URI!, $cursor: String) {
+    resource(url: $url) {
+        ... on Issue {
+            number
+            title
+            body
+            state
+            author { login }
+            repository { nameWithOwner }
+            assignees(first: 100) { nodes { login } }
+            milestone { title }
+            labels(first: 100) { nodes { name } }
+            issueType { name }
+            parent { number title repository { nameWithOwner } }
+            subIssues(first: 100) { nodes { number title repository { nameWithOwner } } }
+            blockedBy(first: 100) { nodes { number title repository { nameWithOwner } } }
+            blocking(first: 100) { nodes { number title repository { nameWithOwner } } }
+            projectItems(first: 100) { nodes { project { title url } } }
+            comments(first: 50, after: $cursor) {
+                pageInfo { hasNextPage endCursor }
+                nodes { author { login } body createdAt }
+            }
+        }
+    }
+}
+"#;
+
+#[cfg(feature = "tui")]
 const UPDATE_FIELD_MUTATION: &str = r#"
 mutation UpdateProjectItemField(
     $projectId: ID!
@@ -190,6 +219,35 @@ pub(crate) struct Content {
     pub(crate) number: Option<u32>,
     pub(crate) title: Option<String>,
     pub(crate) url: Option<String>,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct IssueDetails {
+    pub(crate) number: u32,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) state: String,
+    pub(crate) author: Option<String>,
+    pub(crate) repository: String,
+    pub(crate) comments: Vec<IssueComment>,
+    pub(crate) assignees: Vec<String>,
+    pub(crate) milestone: Option<String>,
+    pub(crate) labels: Vec<String>,
+    pub(crate) issue_type: Option<String>,
+    pub(crate) parent: Option<String>,
+    pub(crate) sub_issues: Vec<String>,
+    pub(crate) blocked_by: Vec<String>,
+    pub(crate) blocking: Vec<String>,
+    pub(crate) projects: Vec<String>,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct IssueComment {
+    pub(crate) author: Option<String>,
+    pub(crate) body: String,
+    pub(crate) created_at: String,
 }
 
 pub(crate) const STATUS_COLUMN: &str = "State";
@@ -305,6 +363,8 @@ pub(crate) struct Project {
 pub(crate) trait ProjectSource {
     fn fetch_project(&self, project_ref: &ProjectRef, token: &str) -> Result<Project, DynError>;
     #[cfg(feature = "tui")]
+    fn fetch_issue(&self, url: &str, token: &str) -> Result<IssueDetails, DynError>;
+    #[cfg(feature = "tui")]
     fn update_field(
         &self,
         project_id: &str,
@@ -417,6 +477,38 @@ impl<T: GraphQlTransport> ProjectSource for GitHubProjectSource<T> {
             editable_fields,
             items,
         })
+    }
+
+    #[cfg(feature = "tui")]
+    fn fetch_issue(&self, url: &str, token: &str) -> Result<IssueDetails, DynError> {
+        let mut details = None;
+        let mut comments = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let payload = serde_json::json!({
+                "query": ISSUE_DETAILS_QUERY,
+                "variables": { "url": url, "cursor": cursor },
+            });
+            let response = self.transport.execute(token, &payload)?;
+            if !(200..300).contains(&response.status) {
+                return Err(http_error(&response));
+            }
+            let page = decode_issue(&response.body, response.rate_limit.as_ref())?;
+            if details.is_none() {
+                details = Some(page.details);
+            }
+            comments.extend(page.comments);
+            if page.has_next_page {
+                cursor = Some(page.end_cursor.ok_or(
+                    "GitHub API response indicated another comment page but omitted the cursor",
+                )?);
+            } else {
+                break;
+            }
+        }
+        let mut details = details.ok_or("GitHub API returned no issue details")?;
+        details.comments = comments;
+        Ok(details)
     }
 
     #[cfg(feature = "tui")]
@@ -588,6 +680,14 @@ struct DecodedPage {
     end_cursor: Option<String>,
 }
 
+#[cfg(feature = "tui")]
+struct DecodedIssuePage {
+    details: IssueDetails,
+    comments: Vec<IssueComment>,
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
 fn decode_project(body: &str, rate_limit: Option<&RateLimit>) -> Result<DecodedPage, DynError> {
     let response: PageResponse = serde_json::from_str(body)?;
     let blocking_errors = response
@@ -631,6 +731,58 @@ fn decode_project(body: &str, rate_limit: Option<&RateLimit>) -> Result<DecodedP
         items: project.items.nodes.into_iter().map(Item::from).collect(),
         has_next_page: project.items.page_info.has_next_page,
         end_cursor: project.items.page_info.end_cursor,
+    })
+}
+
+#[cfg(feature = "tui")]
+fn decode_issue(body: &str, rate_limit: Option<&RateLimit>) -> Result<DecodedIssuePage, DynError> {
+    let response: IssueResponse = serde_json::from_str(body)?;
+    if !response.errors.is_empty() {
+        return Err(api_error(&response.errors, rate_limit));
+    }
+    let issue = response
+        .data
+        .and_then(|data| data.resource)
+        .ok_or("issue not found (check the issue URL and your permissions)")?;
+    let CommentConnection { nodes, page_info } = issue.comments;
+    let comments = nodes
+        .into_iter()
+        .flatten()
+        .map(|comment| IssueComment {
+            author: comment.author.map(|author| author.login),
+            body: comment.body,
+            created_at: comment.created_at,
+        })
+        .collect();
+    let details = IssueDetails {
+        number: issue.number,
+        title: issue.title,
+        body: issue.body,
+        state: issue.state,
+        author: issue.author.map(|author| author.login),
+        repository: issue.repository.name_with_owner,
+        comments: Vec::new(),
+        assignees: issue.assignees.login_values(),
+        milestone: issue.milestone.map(|milestone| milestone.title),
+        labels: issue.labels.name_values(),
+        issue_type: issue.issue_type.map(|issue_type| issue_type.name),
+        parent: issue.parent.map(related_issue_name),
+        sub_issues: issue.sub_issues.issues(),
+        blocked_by: issue.blocked_by.issues(),
+        blocking: issue.blocking.issues(),
+        projects: issue
+            .project_items
+            .nodes
+            .into_iter()
+            .flatten()
+            .map(|item| item.project.title)
+            .collect(),
+    };
+    Ok(DecodedIssuePage {
+        details,
+        comments,
+        has_next_page: page_info.has_next_page,
+        end_cursor: page_info.end_cursor,
     })
 }
 
@@ -738,6 +890,116 @@ struct PageResponse {
     data: Option<PageData>,
     #[serde(default)]
     errors: Vec<ApiError>,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+struct IssueResponse {
+    #[serde(default)]
+    data: Option<IssueResponseData>,
+    #[serde(default)]
+    errors: Vec<ApiError>,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+struct IssueResponseData {
+    #[serde(default)]
+    resource: Option<IssueDetailsData>,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueDetailsData {
+    number: u32,
+    title: String,
+    body: String,
+    state: String,
+    author: Option<UserData>,
+    repository: RepositoryData,
+    assignees: UserConnection,
+    milestone: Option<MilestoneData>,
+    labels: NamedConnection,
+    issue_type: Option<NamedData>,
+    parent: Option<RelatedIssueData>,
+    sub_issues: RelatedIssueConnection,
+    blocked_by: RelatedIssueConnection,
+    blocking: RelatedIssueConnection,
+    project_items: ProjectItemConnection,
+    comments: CommentConnection,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentConnection {
+    #[serde(default)]
+    nodes: Vec<Option<CommentData>>,
+    #[serde(default)]
+    page_info: PageInfo,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentData {
+    author: Option<UserData>,
+    body: String,
+    created_at: String,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+struct RelatedIssueConnection {
+    #[serde(default)]
+    nodes: Vec<Option<RelatedIssueData>>,
+}
+
+#[cfg(feature = "tui")]
+impl RelatedIssueConnection {
+    fn issues(self) -> Vec<String> {
+        self.nodes
+            .into_iter()
+            .flatten()
+            .map(related_issue_name)
+            .collect()
+    }
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+struct RelatedIssueData {
+    number: u32,
+    title: String,
+    repository: RepositoryData,
+}
+
+#[cfg(feature = "tui")]
+fn related_issue_name(issue: RelatedIssueData) -> String {
+    format!(
+        "{}#{} {}",
+        issue.repository.name_with_owner, issue.number, issue.title
+    )
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+struct ProjectItemConnection {
+    #[serde(default)]
+    nodes: Vec<Option<ProjectItemData>>,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+struct ProjectItemData {
+    project: ProjectSummaryData,
+}
+
+#[cfg(feature = "tui")]
+#[derive(Default, Deserialize)]
+struct ProjectSummaryData {
+    title: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -999,7 +1261,16 @@ struct NamedConnection {
 
 impl NamedConnection {
     fn names(self) -> String {
-        join_values(self.nodes.into_iter().flatten().map(|node| node.name))
+        self.name_values().join(", ")
+    }
+
+    fn name_values(self) -> Vec<String> {
+        self.nodes
+            .into_iter()
+            .flatten()
+            .map(|node| node.name)
+            .filter(|name| !name.is_empty())
+            .collect()
     }
 }
 
@@ -1072,7 +1343,16 @@ struct UserConnection {
 
 impl UserConnection {
     fn logins(self) -> String {
-        join_values(self.nodes.into_iter().flatten().map(|user| user.login))
+        self.login_values().join(", ")
+    }
+
+    fn login_values(self) -> Vec<String> {
+        self.nodes
+            .into_iter()
+            .flatten()
+            .map(|user| user.login)
+            .filter(|login| !login.is_empty())
+            .collect()
     }
 }
 
@@ -1192,9 +1472,9 @@ struct MutationResponse {
 pub(crate) mod testing {
     use std::cell::RefCell;
 
-    #[cfg(feature = "tui")]
-    use super::FieldValue;
     use super::{DynError, Project, ProjectRef, ProjectSource};
+    #[cfg(feature = "tui")]
+    use super::{FieldValue, IssueDetails};
 
     #[cfg(feature = "tui")]
     #[derive(Debug, Clone, PartialEq)]
@@ -1218,6 +1498,10 @@ pub(crate) mod testing {
         result: Result<Project, String>,
         requests: RefCell<Vec<(ProjectRef, String)>>,
         #[cfg(feature = "tui")]
+        issue_result: RefCell<Result<IssueDetails, String>>,
+        #[cfg(feature = "tui")]
+        issue_requests: RefCell<Vec<(String, String)>>,
+        #[cfg(feature = "tui")]
         updates: RefCell<Vec<UpdateRequest>>,
         #[cfg(feature = "tui")]
         removals: RefCell<Vec<RemoveRequest>>,
@@ -1228,6 +1512,10 @@ pub(crate) mod testing {
             Self {
                 result: Ok(project),
                 requests: RefCell::default(),
+                #[cfg(feature = "tui")]
+                issue_result: RefCell::new(Err("unexpected issue request".into())),
+                #[cfg(feature = "tui")]
+                issue_requests: RefCell::default(),
                 #[cfg(feature = "tui")]
                 updates: RefCell::default(),
                 #[cfg(feature = "tui")]
@@ -1240,6 +1528,10 @@ pub(crate) mod testing {
                 result: Err(message.into()),
                 requests: RefCell::default(),
                 #[cfg(feature = "tui")]
+                issue_result: RefCell::new(Err("unexpected issue request".into())),
+                #[cfg(feature = "tui")]
+                issue_requests: RefCell::default(),
+                #[cfg(feature = "tui")]
                 updates: RefCell::default(),
                 #[cfg(feature = "tui")]
                 removals: RefCell::default(),
@@ -1248,6 +1540,17 @@ pub(crate) mod testing {
 
         pub(crate) fn requests(&self) -> Vec<(ProjectRef, String)> {
             self.requests.borrow().clone()
+        }
+
+        #[cfg(feature = "tui")]
+        pub(crate) fn with_issue(self, issue: IssueDetails) -> Self {
+            *self.issue_result.borrow_mut() = Ok(issue);
+            self
+        }
+
+        #[cfg(feature = "tui")]
+        pub(crate) fn issue_requests(&self) -> Vec<(String, String)> {
+            self.issue_requests.borrow().clone()
         }
 
         #[cfg(feature = "tui")]
@@ -1271,6 +1574,14 @@ pub(crate) mod testing {
                 .borrow_mut()
                 .push((project_ref.clone(), token.to_string()));
             self.result.clone().map_err(Into::into)
+        }
+
+        #[cfg(feature = "tui")]
+        fn fetch_issue(&self, url: &str, token: &str) -> Result<IssueDetails, DynError> {
+            self.issue_requests
+                .borrow_mut()
+                .push((url.into(), token.into()));
+            self.issue_result.borrow().clone().map_err(Into::into)
         }
 
         #[cfg(feature = "tui")]
@@ -1672,6 +1983,73 @@ mod tests {
         let query = requests[0].1["query"].as_str().unwrap();
         assert!(query.contains("organization(login: $owner)"));
         assert!(!query.contains("resource(url:"));
+    }
+
+    #[test]
+    fn fetches_issue_details_and_all_comment_pages() {
+        let issue_page = |comment: &str, has_next_page: bool, cursor: Option<&str>| {
+            GraphQlResponse {
+                status: 200,
+                rate_limit: None,
+                body: serde_json::json!({
+                    "data": { "resource": {
+                        "number": 42,
+                        "title": "Fix command editing",
+                        "body": "Description",
+                        "state": "OPEN",
+                        "author": { "login": "octocat" },
+                        "repository": { "nameWithOwner": "example/repo" },
+                        "assignees": { "nodes": [{ "login": "hubot" }] },
+                        "milestone": { "title": "v1.0" },
+                        "labels": { "nodes": [{ "name": "bug" }] },
+                        "issueType": { "name": "Bug" },
+                        "parent": { "number": 1, "title": "Parent", "repository": { "nameWithOwner": "example/repo" } },
+                        "subIssues": { "nodes": [{ "number": 43, "title": "Child", "repository": { "nameWithOwner": "example/repo" } }] },
+                        "blockedBy": { "nodes": [{ "number": 2, "title": "Blocker", "repository": { "nameWithOwner": "example/repo" } }] },
+                        "blocking": { "nodes": [{ "number": 3, "title": "Blocked", "repository": { "nameWithOwner": "example/repo" } }] },
+                        "projectItems": { "nodes": [{ "project": { "title": "Roadmap", "url": "https://github.com/orgs/example/projects/1" } }] },
+                        "comments": {
+                            "pageInfo": { "hasNextPage": has_next_page, "endCursor": cursor },
+                            "nodes": [{ "author": { "login": "reviewer" }, "body": comment, "createdAt": "2026-09-18T10:00:00Z" }]
+                        }
+                    } }
+                })
+                .to_string(),
+            }
+        };
+        let source = GitHubProjectSource {
+            transport: FakeTransport::with_responses([
+                issue_page("First", true, Some("next")),
+                issue_page("Second", false, None),
+            ]),
+        };
+
+        let issue = source
+            .fetch_issue("https://github.com/example/repo/issues/42", "secret")
+            .unwrap();
+
+        assert_eq!(issue.title, "Fix command editing");
+        assert_eq!(issue.comments.len(), 2);
+        assert_eq!(issue.comments[1].body, "Second");
+        assert_eq!(issue.assignees, ["hubot"]);
+        assert_eq!(issue.milestone.as_deref(), Some("v1.0"));
+        assert_eq!(issue.labels, ["bug"]);
+        assert_eq!(issue.issue_type.as_deref(), Some("Bug"));
+        assert_eq!(issue.parent.as_deref(), Some("example/repo#1 Parent"));
+        assert_eq!(issue.sub_issues, ["example/repo#43 Child"]);
+        assert_eq!(issue.blocked_by, ["example/repo#2 Blocker"]);
+        assert_eq!(issue.blocking, ["example/repo#3 Blocked"]);
+        assert_eq!(issue.projects, ["Roadmap"]);
+        let requests = source.transport.requests.borrow();
+        assert_eq!(
+            requests[0].1["variables"]["cursor"],
+            serde_json::Value::Null
+        );
+        assert_eq!(requests[1].1["variables"]["cursor"], "next");
+        assert_eq!(
+            requests[0].1["variables"]["url"],
+            "https://github.com/example/repo/issues/42"
+        );
     }
 
     #[test]

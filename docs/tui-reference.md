@@ -43,13 +43,31 @@ Normal mode navigates project items and enters other modes.
 | `g` or `Home` | Select the first item |
 | `G` or `End` | Select the last item |
 | `Enter` | Activate the selected row and its first visible editable field |
-| `Space` | Open the selected pull request in `tuicr` |
+| `Space` | Open the selected issue in the issue viewer, or a pull request in `tuicr` |
 | `?` | Open the item status emoji legend |
 | `:` | Enter command mode |
 
 Opening a pull request temporarily leaves `ghui` while `tuicr` runs. Exiting
 `tuicr` returns to the current project view. The `tuicr` executable must be
 available on `PATH`.
+
+## Issue viewer
+
+The full-screen issue viewer keeps the issue title, number, and author in a
+fixed pane at the top of the left column. The description and complete comment
+conversation scroll beneath it, with the description and each comment displayed
+in its own bordered box. The narrower right column displays assignees, milestone,
+labels, issue type, parent and child relationships, blocking relationships, and
+project memberships. Content and metadata scroll independently; the active pane
+has a cyan border.
+
+| Shortcut | Action |
+| --- | --- |
+| `Tab` | Switch the active pane between content and metadata |
+| `j`, `Down`, or `Page Down` | Scroll down |
+| `k`, `Up`, or `Page Up` | Scroll up |
+| `g` or `Home` | Scroll to the top |
+| `q` or `Escape` | Return to the project |
 
 ## Item status
 

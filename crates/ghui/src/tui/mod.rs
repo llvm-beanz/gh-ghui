@@ -19,12 +19,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::auth;
 use crate::github::{
     emoji_status, parse_project_url, DynError, EditableField, EditableFieldKind, FieldValue,
-    GitHubProjectSource, Item, Kind, Project, ProjectSource, STATUS_COLUMN,
+    GitHubProjectSource, IssueDetails, Item, Kind, Project, ProjectSource, STATUS_COLUMN,
 };
 use crate::query::{select_items, FilterExpression, SortSpec};
 use state::{SessionState, ViewState};
@@ -55,6 +55,10 @@ struct App {
     message: Option<String>,
     error_dialog: Option<String>,
     legend_dialog: bool,
+    issue_viewer: Option<IssueDetails>,
+    issue_pane: IssuePane,
+    issue_content_scroll: u16,
+    issue_metadata_scroll: u16,
     should_quit: bool,
 }
 
@@ -77,9 +81,20 @@ impl Default for App {
             message: None,
             error_dialog: None,
             legend_dialog: false,
+            issue_viewer: None,
+            issue_pane: IssuePane::default(),
+            issue_content_scroll: 0,
+            issue_metadata_scroll: 0,
             should_quit: false,
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum IssuePane {
+    #[default]
+    Content,
+    Metadata,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -90,6 +105,7 @@ enum Mode {
     Columns,
     Active,
     EditField,
+    IssueViewer,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -124,6 +140,7 @@ struct RemoveItems {
 enum Action {
     Edit(String),
     OpenPullRequest(String),
+    OpenIssue(String),
     Refresh,
     Write,
     WriteQuit,
@@ -179,6 +196,7 @@ impl App {
             Mode::Columns => self.handle_columns_key(key.code),
             Mode::Active => self.handle_active_key(key.code),
             Mode::EditField => self.handle_field_editor_key(key.code),
+            Mode::IssueViewer => self.handle_issue_viewer_key(key.code),
         }
     }
 
@@ -193,7 +211,7 @@ impl App {
                 self.mode = Mode::Command;
             }
             KeyCode::Char('?') => self.legend_dialog = true,
-            KeyCode::Char(' ') => return self.open_pull_request_action(),
+            KeyCode::Char(' ') => return self.open_selected_action(),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::PageDown => self.move_selection(10),
@@ -206,12 +224,14 @@ impl App {
         None
     }
 
-    fn open_pull_request_action(&self) -> Option<Action> {
+    fn open_selected_action(&self) -> Option<Action> {
         let content = self.selected_item()?.content.as_ref()?;
-        (content.kind == Kind::PullRequest)
-            .then(|| content.url.clone())
-            .flatten()
-            .map(Action::OpenPullRequest)
+        let url = content.url.clone()?;
+        match content.kind {
+            Kind::Issue => Some(Action::OpenIssue(url)),
+            Kind::PullRequest => Some(Action::OpenPullRequest(url)),
+            Kind::Other => None,
+        }
     }
 
     fn remove_items_action(&self, count: usize) -> Option<Action> {
@@ -337,6 +357,57 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    fn handle_issue_viewer_key(&mut self, key: KeyCode) -> Option<Action> {
+        match key {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.issue_viewer = None;
+                self.reset_issue_viewer_state();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.issue_pane = match self.issue_pane {
+                    IssuePane::Content => IssuePane::Metadata,
+                    IssuePane::Metadata => IssuePane::Content,
+                };
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                *self.active_issue_scroll_mut() = self.active_issue_scroll().saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                *self.active_issue_scroll_mut() = self.active_issue_scroll().saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                *self.active_issue_scroll_mut() = self.active_issue_scroll().saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                *self.active_issue_scroll_mut() = self.active_issue_scroll().saturating_sub(10);
+            }
+            KeyCode::Home | KeyCode::Char('g') => *self.active_issue_scroll_mut() = 0,
+            _ => {}
+        }
+        None
+    }
+
+    fn active_issue_scroll(&self) -> u16 {
+        match self.issue_pane {
+            IssuePane::Content => self.issue_content_scroll,
+            IssuePane::Metadata => self.issue_metadata_scroll,
+        }
+    }
+
+    fn active_issue_scroll_mut(&mut self) -> &mut u16 {
+        match self.issue_pane {
+            IssuePane::Content => &mut self.issue_content_scroll,
+            IssuePane::Metadata => &mut self.issue_metadata_scroll,
+        }
+    }
+
+    fn reset_issue_viewer_state(&mut self) {
+        self.issue_pane = IssuePane::Content;
+        self.issue_content_scroll = 0;
+        self.issue_metadata_scroll = 0;
     }
 
     fn handle_field_editor_key(&mut self, key: KeyCode) -> Option<Action> {
@@ -783,6 +854,8 @@ impl App {
         self.mode = Mode::Normal;
         self.active_column = None;
         self.field_editor = None;
+        self.issue_viewer = None;
+        self.reset_issue_viewer_state();
     }
 
     fn session_state(&self) -> SessionState {
@@ -926,6 +999,13 @@ pub fn run(initial_target: Option<&str>) -> Result<(), DynError> {
                 Some(Action::OpenPullRequest(url)) => {
                     open_pull_request_in_tuicr(&mut session, &mut app, &url)?;
                 }
+                Some(Action::OpenIssue(url)) => open_issue_with_progress(
+                    &mut session.terminal,
+                    &mut app,
+                    &url,
+                    &token_provider,
+                    &source,
+                )?,
                 Some(Action::Refresh) => refresh_project_with_progress(
                     &mut session.terminal,
                     &mut app,
@@ -1020,6 +1100,40 @@ fn refresh_project_with_progress(
     terminal.draw(|frame| render(frame, app))?;
     refresh_project(app, token_provider, source);
     Ok(())
+}
+
+fn open_issue_with_progress(
+    terminal: &mut Tui,
+    app: &mut App,
+    url: &str,
+    token_provider: &dyn TokenProvider,
+    source: &dyn ProjectSource,
+) -> Result<(), DynError> {
+    app.message = Some("Loading issue...".into());
+    app.error_dialog = None;
+    terminal.draw(|frame| render(frame, app))?;
+    open_issue(app, url, token_provider, source);
+    Ok(())
+}
+
+fn open_issue(
+    app: &mut App,
+    url: &str,
+    token_provider: &dyn TokenProvider,
+    source: &dyn ProjectSource,
+) {
+    let result = token_provider
+        .token()
+        .and_then(|token| source.fetch_issue(url, &token));
+    match result {
+        Ok(issue) => {
+            app.issue_viewer = Some(issue);
+            app.reset_issue_viewer_state();
+            app.mode = Mode::IssueViewer;
+            app.message = None;
+        }
+        Err(error) => app.show_error(error.to_string()),
+    }
 }
 
 fn refresh_project(app: &mut App, token_provider: &dyn TokenProvider, source: &dyn ProjectSource) {
@@ -1243,6 +1357,13 @@ fn restore_session_state(
 }
 
 fn render(frame: &mut Frame, app: &App) {
+    if app.mode == Mode::IssueViewer {
+        render_issue_viewer(frame, app);
+        if let Some(error) = app.error_dialog.as_deref() {
+            render_error_dialog(frame, error);
+        }
+        return;
+    }
     let [tabs_area, content_area, status_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -1307,6 +1428,7 @@ fn render(frame: &mut Frame, app: &App) {
                 .as_deref()
                 .unwrap_or(" EDIT FIELD  Enter save  Esc cancel "),
         ),
+        Mode::IssueViewer => unreachable!(),
     };
     frame.render_widget(Paragraph::new(status), status_content_area);
     frame.render_widget(
@@ -1335,6 +1457,227 @@ fn render(frame: &mut Frame, app: &App) {
     if app.legend_dialog {
         render_legend_dialog(frame);
     }
+}
+
+fn render_issue_viewer(frame: &mut Frame, app: &App) {
+    let Some(issue) = app.issue_viewer.as_ref() else {
+        return;
+    };
+    let [content_area, status_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+    let [main_area, metadata_area] =
+        Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .areas(content_area);
+    let [issue_header_area, conversation_area] =
+        Layout::vertical([Constraint::Length(5), Constraint::Min(1)]).areas(main_area);
+
+    let header_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(issue_pane_border_style(
+            app.issue_pane == IssuePane::Content,
+        ))
+        .title(" Issue ");
+    let header_inner = header_block.inner(issue_header_area);
+    frame.render_widget(header_block, issue_header_area);
+    let [title_area, byline_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(header_inner);
+    frame.render_widget(
+        Paragraph::new(issue.title.as_str()).wrap(Wrap { trim: false }),
+        title_area,
+    );
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}#{} · opened by {}",
+            issue.repository,
+            issue.number,
+            issue.author.as_deref().unwrap_or("unknown")
+        )),
+        byline_area,
+    );
+
+    let card_width = conversation_area.width.saturating_sub(2) as usize;
+    let conversation = issue_content(issue, card_width);
+    frame.render_widget(
+        Paragraph::new(conversation)
+            .scroll((app.issue_content_scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(issue_pane_border_style(
+                        app.issue_pane == IssuePane::Content,
+                    ))
+                    .title(" Content "),
+            ),
+        conversation_area,
+    );
+
+    let metadata = issue_metadata(issue);
+    frame.render_widget(
+        Paragraph::new(metadata)
+            .wrap(Wrap { trim: false })
+            .scroll((app.issue_metadata_scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(issue_pane_border_style(
+                        app.issue_pane == IssuePane::Metadata,
+                    ))
+                    .title(" Metadata "),
+            ),
+        metadata_area,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            " ISSUE  Tab switch pane  j/k or arrows scroll  PageUp/PageDown  g top  q/Esc close ",
+        ),
+        status_area,
+    );
+}
+
+fn issue_pane_border_style(active: bool) -> Style {
+    if active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    }
+}
+
+fn issue_content(issue: &IssueDetails, width: usize) -> String {
+    let description = if issue.body.is_empty() {
+        "No description."
+    } else {
+        &issue.body
+    };
+    let mut sections = vec![bordered_text(
+        &format!("Description · {}", issue.state),
+        description,
+        width,
+    )];
+    sections.push("Conversation".into());
+    if issue.comments.is_empty() {
+        sections.push(bordered_text("Comments", "No comments.", width));
+    } else {
+        sections.extend(issue.comments.iter().map(|comment| {
+            bordered_text(
+                &format!(
+                    "{} · {}",
+                    comment.author.as_deref().unwrap_or("unknown"),
+                    comment.created_at
+                ),
+                &comment.body,
+                width,
+            )
+        }));
+    }
+    sections.join("\n")
+}
+
+fn bordered_text(title: &str, body: &str, width: usize) -> String {
+    let width = width.max(4);
+    let inner_width = width - 4;
+    let title = truncate_display(title, width.saturating_sub(5));
+    let top_prefix = format!("┌─ {title} ");
+    let top_fill = width.saturating_sub(UnicodeWidthStr::width(top_prefix.as_str()) + 1);
+    let mut lines = vec![format!("{top_prefix}{}┐", "─".repeat(top_fill))];
+    lines.extend(
+        wrap_display_lines(body, inner_width)
+            .into_iter()
+            .map(|line| {
+                let padding = inner_width.saturating_sub(UnicodeWidthStr::width(line.as_str()));
+                format!("│ {line}{} │", " ".repeat(padding))
+            }),
+    );
+    lines.push(format!("└{}┘", "─".repeat(width - 2)));
+    lines.join("\n")
+}
+
+fn wrap_display_lines(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    for source_line in text.lines() {
+        if source_line.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        let mut line_width = 0;
+        for character in source_line.chars() {
+            let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
+            if line_width + character_width > width && !line.is_empty() {
+                lines.push(line);
+                line = String::new();
+                line_width = 0;
+            }
+            line.push(character);
+            line_width += character_width;
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn truncate_display(text: &str, width: usize) -> String {
+    let mut result = String::new();
+    let mut result_width = 0;
+    for character in text.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
+        if result_width + character_width > width {
+            break;
+        }
+        result.push(character);
+        result_width += character_width;
+    }
+    result
+}
+
+fn issue_metadata(issue: &IssueDetails) -> String {
+    fn section(name: &str, values: &[String]) -> String {
+        let value = if values.is_empty() {
+            "None".into()
+        } else {
+            values.join("\n")
+        };
+        format!("{name}\n{value}")
+    }
+
+    let relationships = issue
+        .parent
+        .iter()
+        .map(|parent| format!("Parent: {parent}"))
+        .chain(issue.sub_issues.iter().map(|item| format!("Child: {item}")))
+        .chain(
+            issue
+                .blocked_by
+                .iter()
+                .map(|item| format!("Blocked by: {item}")),
+        )
+        .chain(
+            issue
+                .blocking
+                .iter()
+                .map(|item| format!("Blocking: {item}")),
+        )
+        .collect::<Vec<_>>();
+    [
+        section("Assignees", &issue.assignees),
+        section(
+            "Milestone",
+            &issue.milestone.iter().cloned().collect::<Vec<_>>(),
+        ),
+        section("Labels", &issue.labels),
+        section(
+            "Type",
+            &issue.issue_type.iter().cloned().collect::<Vec<_>>(),
+        ),
+        section("Relationships", &relationships),
+        section("Projects", &issue.projects),
+    ]
+    .join("\n\n")
 }
 
 fn render_project(
@@ -1685,7 +2028,7 @@ mod tests {
 
     use super::*;
     use crate::github::testing::MockProjectSource;
-    use crate::github::{Content, FieldOption};
+    use crate::github::{Content, FieldOption, IssueComment};
 
     struct FixedToken(Option<String>);
 
@@ -1742,6 +2085,31 @@ mod tests {
                     fields: vec![("Status".into(), "Todo".into())],
                 })
                 .collect(),
+        }
+    }
+
+    fn sample_issue() -> IssueDetails {
+        IssueDetails {
+            number: 42,
+            title: "Fix command editing".into(),
+            body: "The command cursor should move.".into(),
+            state: "OPEN".into(),
+            author: Some("octocat".into()),
+            repository: "example/repo".into(),
+            comments: vec![IssueComment {
+                author: Some("hubot".into()),
+                body: "Confirmed.".into(),
+                created_at: "2026-09-18T10:00:00Z".into(),
+            }],
+            assignees: vec!["octocat".into()],
+            milestone: Some("v1.0".into()),
+            labels: vec!["bug".into()],
+            issue_type: Some("Bug".into()),
+            parent: Some("example/repo#1 Parent".into()),
+            sub_issues: vec!["example/repo#43 Child".into()],
+            blocked_by: vec!["example/repo#2 Blocker".into()],
+            blocking: vec!["example/repo#3 Blocked".into()],
+            projects: vec!["Roadmap".into()],
         }
     }
 
@@ -2154,7 +2522,7 @@ mod tests {
     }
 
     #[test]
-    fn space_opens_only_a_selected_pull_request_with_a_url() {
+    fn space_opens_the_selected_issue_or_pull_request() {
         let mut project = sample_project(1);
         let content = project.items[0].content.as_mut().unwrap();
         content.kind = Kind::PullRequest;
@@ -2173,7 +2541,17 @@ mod tests {
             .as_mut()
             .unwrap()
             .kind = Kind::Issue;
-        assert_eq!(app.handle_key(key(KeyCode::Char(' '))), None);
+        app.project_mut().unwrap().items[0]
+            .content
+            .as_mut()
+            .unwrap()
+            .url = Some("https://github.com/example/repo/issues/42".into());
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char(' '))),
+            Some(Action::OpenIssue(
+                "https://github.com/example/repo/issues/42".into()
+            ))
+        );
 
         let content = app.project_mut().unwrap().items[0]
             .content
@@ -2185,6 +2563,143 @@ mod tests {
 
         app.view_mut().selected = None;
         assert_eq!(app.handle_key(key(KeyCode::Char(' '))), None);
+    }
+
+    #[test]
+    fn opening_issue_loads_details_and_viewer_closes_to_project() {
+        let source = MockProjectSource::returning(sample_project(1)).with_issue(sample_issue());
+        let mut app = app_with_project(sample_project(1), ViewState::new(None, Some(0)));
+
+        open_issue(
+            &mut app,
+            "https://github.com/example/repo/issues/42",
+            &FixedToken(Some("token".into())),
+            &source,
+        );
+
+        assert_eq!(app.mode, Mode::IssueViewer);
+        assert_eq!(
+            app.issue_viewer.as_ref().unwrap().title,
+            "Fix command editing"
+        );
+        assert_eq!(
+            source.issue_requests(),
+            [(
+                "https://github.com/example/repo/issues/42".into(),
+                "token".into()
+            )]
+        );
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.issue_content_scroll, 1);
+        assert_eq!(app.issue_metadata_scroll, 0);
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.issue_pane, IssuePane::Metadata);
+        assert_eq!(app.issue_content_scroll, 1);
+        assert_eq!(app.issue_metadata_scroll, 10);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.issue_viewer.is_none());
+        assert_eq!(app.issue_pane, IssuePane::Content);
+        assert_eq!(app.issue_content_scroll, 0);
+        assert_eq!(app.issue_metadata_scroll, 0);
+    }
+
+    #[test]
+    fn issue_viewer_renders_conversation_and_metadata_columns() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App {
+            mode: Mode::IssueViewer,
+            issue_viewer: Some(sample_issue()),
+            ..Default::default()
+        };
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for text in [
+            "Fix command editing",
+            "┌─ Description · OPEN",
+            "Conversation",
+            "┌─ hubot · 2026-09-18T10:00:00Z",
+            "Confirmed.",
+            "Assignees",
+            "Milestone",
+            "Labels",
+            "Type",
+            "Relationships",
+            "Projects",
+        ] {
+            assert!(screen.contains(text), "missing {text:?} in {screen}");
+        }
+        assert_eq!(buffer.cell((0, 0)).unwrap().fg, Color::Cyan);
+        assert_eq!(buffer.cell((0, 5)).unwrap().symbol(), "┌");
+        assert_eq!(buffer.cell((0, 5)).unwrap().fg, Color::Cyan);
+        assert_ne!(buffer.cell((70, 0)).unwrap().fg, Color::Cyan);
+
+        let app = App {
+            issue_pane: IssuePane::Metadata,
+            ..app
+        };
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_ne!(buffer.cell((0, 0)).unwrap().fg, Color::Cyan);
+        assert_ne!(buffer.cell((0, 5)).unwrap().fg, Color::Cyan);
+        assert_eq!(buffer.cell((70, 0)).unwrap().fg, Color::Cyan);
+    }
+
+    #[test]
+    fn issue_content_boxes_wrap_to_the_available_width() {
+        let mut issue = sample_issue();
+        issue.body = "A description that must wrap across several narrow lines.".into();
+        issue.comments.push(IssueComment {
+            author: Some("reviewer".into()),
+            body: "Another comment".into(),
+            created_at: "2026-09-18T11:00:00Z".into(),
+        });
+
+        let content = issue_content(&issue, 24);
+
+        assert_eq!(content.matches('┌').count(), 3);
+        assert!(content.contains("┌─ Description · OPEN"));
+        assert!(content.contains("┌─ hubot · 2026-09-"));
+        assert!(content.contains("┌─ reviewer · 2026-"));
+        assert!(content
+            .lines()
+            .all(|line| UnicodeWidthStr::width(line) <= 24));
+    }
+
+    #[test]
+    fn issue_viewer_header_stays_visible_while_content_scrolls() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App {
+            mode: Mode::IssueViewer,
+            issue_viewer: Some(sample_issue()),
+            issue_content_scroll: 8,
+            ..Default::default()
+        };
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let first_rows = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .take(5)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(first_rows.contains("Fix command editing"));
+        assert!(first_rows.contains("example/repo#42"));
+        assert!(first_rows.contains("opened by octocat"));
     }
 
     #[test]
