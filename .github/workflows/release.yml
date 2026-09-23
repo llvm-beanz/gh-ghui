@@ -17,6 +17,9 @@ jobs:
           - runner: ubuntu-latest
             asset: gh-ghui-linux-amd64
             executable: target/release/gh-ghui
+          - runner: ubuntu-24.04-arm
+            asset: gh-ghui-linux-arm64
+            executable: target/release/gh-ghui
           - runner: macos-15-intel
             asset: gh-ghui-darwin-amd64
             executable: target/release/gh-ghui
@@ -25,6 +28,9 @@ jobs:
             executable: target/release/gh-ghui
           - runner: windows-latest
             asset: gh-ghui-windows-amd64.exe
+            executable: target/release/gh-ghui.exe
+          - runner: windows-11-arm
+            asset: gh-ghui-windows-arm64.exe
             executable: target/release/gh-ghui.exe
     runs-on: ${{ matrix.runner }}
     steps:
@@ -44,10 +50,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+      - run: chmod +x .github/scripts/prepare-release-assets.sh
+      - uses: cli/gh-extension-precompile@v2
+        with:
+          build_script_override: .github/scripts/prepare-release-assets.sh
